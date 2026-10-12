@@ -12,6 +12,7 @@ import copy
 import re
 from datetime import datetime
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable
 
 from ..core.video_matrix import VideoMatrixCore, SharedMediaCache
@@ -27,6 +28,16 @@ class TaskBusyError(RuntimeError):
     """A requested operation conflicts with active production or benchmarking."""
 
 
+@dataclass
+class _ProductionRun:
+    # Keep only configuration and slot identities, not decoded frames or cores.
+    config: dict
+    specs: Optional[List[dict]] = None
+    jobs: Optional[List[tuple[int, int]]] = None
+    outputs: Dict[tuple[int, int], str] = field(default_factory=dict)
+    active: bool = True
+
+
 class TaskService:
     def __init__(self, shared_cache: Optional[SharedMediaCache] = None):
         self.shared_cache = shared_cache or SharedMediaCache()
@@ -39,6 +50,7 @@ class TaskService:
         self.cover_processor = RandomCoverProcessor()
         self.variant_processes: Dict[str, set[subprocess.Popen]] = {}
         self._benchmark_task_id: Optional[str] = None
+        self._production_runs: Dict[str, _ProductionRun] = {}
 
     def _create_log_callback(self, task_id: str) -> Callable:
         def callback(message: str):
@@ -133,20 +145,73 @@ class TaskService:
                 raise TaskBusyError("智能压测尚未结束，请等待压测或停止后的清理完成再启动生产。")
             self.tasks[task_id] = status
             self.log_buffers[task_id] = []
+            self._production_runs[task_id] = _ProductionRun(copy.deepcopy(task_cfg))
 
-        thread = threading.Thread(
-            target=self._run_pipeline,
-            args=(task_id, task_cfg),
-            daemon=True
-        )
-        thread.start()
+        self._start_production_run(task_id)
         return task_id
+
+    def _start_production_run(self, task_id: str):
+        run = self._production_runs[task_id]
+        try:
+            threading.Thread(target=self._run_pipeline,
+                             args=(task_id, copy.deepcopy(run.config)), daemon=True).start()
+        except Exception:
+            with self.cores_lock:
+                run.active = False
+                self.tasks[task_id].status = 'failed'
+                self.tasks[task_id].message = '任务线程启动失败，可点击继续重试。'
+                self._refresh_task_controls_locked(task_id)
+            raise
+
+    def _refresh_task_controls_locked(self, task_id: str):
+        status = self.tasks[task_id]
+        run = self._production_runs.get(task_id)
+        status.stopping = status.status == 'stopped' and (
+            run.active if run else self._benchmark_task_id == task_id)
+        status.resume_remaining = (max(0, len(run.jobs) - len(run.outputs))
+                                   if run and run.jobs is not None else 0)
+        status.can_resume = bool(run and not run.active
+                                 and status.status in ('stopped', 'partial', 'failed')
+                                 and (run.jobs is None or status.resume_remaining))
+
+    def resume_task(self, task_id: str) -> bool:
+        with self.cores_lock:
+            status = self.tasks.get(task_id)
+            if status is None:
+                return False
+            run = self._production_runs.get(task_id)
+            if run is None:
+                raise ValueError('压测需重新开始，不能继续旧样本。' if task_id.startswith('benchmark-')
+                                 else '没有可继续的任务记录（任务已完成或软件已重新启动）。')
+            if run.active or status.status in ('pending', 'running'):
+                raise TaskBusyError('任务仍在运行或停止清理中，请等待退出后再继续。')
+            if self._benchmark_task_id is not None:
+                raise TaskBusyError('智能压测尚未结束，请结束压测后再继续生产。')
+            self._refresh_task_controls_locked(task_id)
+            if not status.can_resume:
+                raise ValueError('此任务已无剩余待生成视频。')
+            run.active = True  # Reserve before thread launch to reject double clicks.
+            status.status = 'pending'
+            status.can_resume = False
+            status.stopping = False
+            status.current = len(run.outputs)
+            status.progress = int(status.current / status.total * 100) if status.total else 0
+            status.acceleration = status.acceleration_warning = ''
+            status.effective_concurrency = 0
+            status.message = f'准备继续：保留 {len(status.output_files)} 个可用视频，仅生成剩余项。'
+            status.updated_at = datetime.now()
+        self._create_log_callback(task_id)(f'>>> [继续] {status.message}')
+        self._start_production_run(task_id)
+        return True
 
     def _run_pipeline(self, task_id: str, config: dict):
         status = self.tasks[task_id]
         log_cb = self._create_log_callback(task_id)
         with self.cores_lock:
+            run = self._production_runs.setdefault(task_id, _ProductionRun(copy.deepcopy(config)))
             if status.status == 'stopped':
+                run.active = False
+                self._refresh_task_controls_locked(task_id)
                 return
             status.status = "running"
         status.updated_at = datetime.now()
@@ -165,7 +230,9 @@ class TaskService:
             if status.status == 'stopped':
                 status.message = '已停止，未开始渲染。'
                 return
-            tasks = self._get_tasks_from_config(config)
+            if run.specs is None:
+                run.specs = copy.deepcopy(self._get_tasks_from_config(config))
+            tasks = run.specs
             if not tasks:
                 log_cb(">>> [错误] 找不到任何素材目录！")
                 status.status = "failed"
@@ -173,9 +240,15 @@ class TaskService:
                 return
 
             cores = []
-            for t in tasks:
+            jobs = []
+            resuming = run.jobs is not None
+            remaining = [key for key in run.jobs or [] if key not in run.outputs]
+            for pool_id, t in enumerate(tasks):
                 if status.status == "stopped":
                     break
+                indices = [idx for pool, idx in remaining if pool == pool_id] if resuming else None
+                if resuming and not indices:
+                    continue  # Fully finished SKU libraries need no probe/encode.
                 task_cfg = config.copy()
                 task_cfg['task_name'] = t['name']
                 task_cfg['hook_dir'] = t['hook_dir']
@@ -184,40 +257,44 @@ class TaskService:
                 task_cfg['body_groups'] = config.get('body_groups') or []
                 task_cfg['out_dir'] = t['out']
                 task_cfg['_hardware_session'] = hardware_session
+                if resuming:
+                    task_cfg['target_count'] = len(indices)
                 os.makedirs(task_cfg['out_dir'], exist_ok=True)
 
                 core = VideoMatrixCore(task_cfg, log_cb, self.shared_cache)
+                with self.cores_lock:
+                    if status.status == 'stopped':
+                        core.stop()
+                        break
+                    self.active_cores.setdefault(task_id, []).append(core)
                 ok, msg = core.pre_flight_check()
                 if ok:
                     cores.append(core)
-                    with self.cores_lock:
-                        if task_id not in self.active_cores:
-                            self.active_cores[task_id] = []
-                        self.active_cores[task_id].append(core)
+                    core._production_pool = pool_id
+                    slots = indices[:core.config['target_count']] if resuming else range(1, core.config['target_count'] + 1)
+                    jobs.extend((core, idx) for idx in slots)
                 else:
                     log_cb(f"[{t['name']}] 预检拦截: {msg}")
 
-            if not cores:
-                if status.status == 'stopped':
-                    status.message = '已停止，未开始渲染。'
-                    return
-                log_cb(">>> 所有库均被拦截，任务终止。")
-                status.status = "failed"
-                status.message = "所有库预检失败"
+            if status.status == 'stopped':
+                # Do not freeze a half-prepared SKU plan and lose later libraries.
+                status.message = '已停止，预检未完成；继续时重新准备原任务素材库。'
                 return
 
-            jobs = []
-            max_t = max([c.config['target_count'] for c in cores], default=0)
-            for i in range(1, max_t + 1):
-                for core in cores:
-                    if i <= core.config['target_count']:
-                        jobs.append((core, i))
+            if not cores:
+                log_cb(">>> 所有库均被拦截，任务终止。")
+                status.status = "partial" if status.output_files else "failed"
+                status.message = "剩余库预检失败；已产出的视频保留，可修复素材后继续。"
+                return
 
-            status.total = len(jobs)
+            # Preserve the original interleaved SKU ordering and original indices.
+            jobs.sort(key=lambda job: (job[1], job[0]._production_pool))
+            if run.jobs is None:
+                run.jobs = [(core._production_pool, idx) for core, idx in jobs]
+            status.total = len(run.jobs)
             log_cb(f">>> [系统] 任务池组装完毕，即将并线生成 {len(jobs)} 个视频。")
 
             success_counts = {core.task_name: 0 for core in cores}
-            completed = 0
 
             concurrent_limit = max(1, int(config.get('concurrent_tasks', 3)))
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_limit) as executor:
@@ -231,9 +308,8 @@ class TaskService:
                             success_counts[core.task_name] += 1
                     except Exception as e:
                         log_cb(f"[{core.task_name}] 渲染异常: {e}")
-                    completed += 1
-                    status.current = completed
-                    status.progress = int(completed / len(jobs) * 100)
+                    status.current = len(status.output_files)
+                    status.progress = int(status.current / status.total * 100) if status.total else 0
                     status.updated_at = datetime.now()
 
             if status.status != "stopped":
@@ -254,12 +330,20 @@ class TaskService:
                 status.status = "failed"
                 status.message = str(e)
         finally:
-            if hardware_session is not None:
-                hardware_session.close()
-            status.updated_at = datetime.now()
-            with self.cores_lock:
-                self.active_cores.pop(task_id, None)
-                self.variant_processes.pop(task_id, None)
+            try:
+                if hardware_session is not None:
+                    hardware_session.close()
+            finally:
+                status.updated_at = datetime.now()
+                with self.cores_lock:
+                    self.active_cores.pop(task_id, None)
+                    self.variant_processes.pop(task_id, None)
+                    run.active = False  # Workers and hardware have now drained.
+                    status.current = len(status.output_files)
+                    status.progress = int(status.current / status.total * 100) if status.total else 0
+                    self._refresh_task_controls_locked(task_id)
+                    if run.jobs is not None and len(run.outputs) == len(run.jobs):
+                        self._production_runs.pop(task_id, None)  # Finished tasks need no resume checkpoint.
 
     @staticmethod
     def _update_acceleration(status: TaskStatus, values: dict):
@@ -279,7 +363,7 @@ class TaskService:
         status.status = "failed" if not usable else "partial" if warnings or failed else "completed"
         status.message = f"完整完成 {usable - warnings}/{status.total}，后处理未完成但已保留 {warnings} 个，失败 {failed} 个。"
 
-    def _register_output(self, status: TaskStatus, path: str, elapsed, warnings):
+    def _register_output(self, status: TaskStatus, path: str, elapsed, warnings, job_key=None):
         if not os.path.isfile(path):
             return False
         with self.cores_lock:
@@ -291,6 +375,8 @@ class TaskService:
                 status.output_warnings[path] = '；'.join(warnings)
             else:
                 status.output_warnings.pop(path, None)
+            if job_key is not None and status.task_id in self._production_runs:
+                self._production_runs[status.task_id].outputs[job_key] = path
         return True
 
     def _render_job(self, core: VideoMatrixCore, idx: int, status: TaskStatus) -> bool:
@@ -331,7 +417,9 @@ class TaskService:
             else:
                 warnings.append(f"{stage}未完成：{short_error(error or '处理失败')}")
                 core.log(f"    [{core.task_name}] {stage}警告：{short_error(error or '处理失败')}，已保留原成片。")
-        if not self._register_output(status, output_path, elapsed, warnings):
+        pool_id = getattr(core, '_production_pool', None)
+        job_key = (pool_id, idx) if pool_id is not None else None
+        if not self._register_output(status, output_path, elapsed, warnings, job_key):
             return False
         if warnings:
             core.log(f"    [{core.task_name}] 视频 {idx:03d} 已保留，后处理未全部完成，详情见产出列表。")
@@ -358,6 +446,7 @@ class TaskService:
             if self.tasks[task_id].status not in ('pending', 'running'):
                 return False
             self.tasks[task_id].status = "stopped"
+            self._refresh_task_controls_locked(task_id)
             cores = list(self.active_cores.get(task_id, []))
             processes = list(self.variant_processes.get(task_id, set()))
         for core in cores:
@@ -381,10 +470,16 @@ class TaskService:
         return stopped
 
     def get_task(self, task_id: str) -> Optional[TaskStatus]:
-        return self.tasks.get(task_id)
+        with self.cores_lock:
+            if task_id in self.tasks:
+                self._refresh_task_controls_locked(task_id)
+            return self.tasks.get(task_id)
 
     def get_all_tasks(self) -> List[TaskStatus]:
-        return list(self.tasks.values())
+        with self.cores_lock:
+            for task_id in self.tasks:
+                self._refresh_task_controls_locked(task_id)
+            return list(self.tasks.values())
 
     def get_logs(self, task_id: str) -> List[str]:
         with self._log_lock:
@@ -554,6 +649,7 @@ class TaskService:
         with self.cores_lock:
             if (self._benchmark_task_id is not None
                     or any(task.status in ('pending', 'running') for task in self.tasks.values())
+                    or any(run.active for run in self._production_runs.values())
                     or any(self.active_cores.values()) or any(self.variant_processes.values())):
                 raise TaskBusyError('已有生产任务或压测正在运行/停止清理，请等待结束后再压测。')
             self._benchmark_task_id = task_id

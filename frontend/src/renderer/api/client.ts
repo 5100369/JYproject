@@ -289,6 +289,9 @@ export interface TaskStatus {
   acceleration?: string
   acceleration_warning?: string
   effective_concurrency?: number
+  stopping?: boolean
+  can_resume?: boolean
+  resume_remaining?: number
 }
 
 export interface FramingPreview {
@@ -315,6 +318,9 @@ export const api = {
 
   stopTask: (taskId: string) =>
     request<{ message: string }>(`/tasks/${taskId}/stop`, { method: 'POST' }),
+
+  resumeTask: (taskId: string) =>
+    request<{ task_id: string; message: string }>(`/tasks/${taskId}/resume`, { method: 'POST' }),
 
   getLogs: (taskId: string) => request<{ logs: string[] }>(`/tasks/${taskId}/logs`),
 

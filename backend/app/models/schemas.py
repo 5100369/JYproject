@@ -143,6 +143,9 @@ class TaskStatus(BaseModel):
     acceleration: str = ""
     acceleration_warning: str = ""
     effective_concurrency: int = 0
+    stopping: bool = False
+    can_resume: bool = False
+    resume_remaining: int = Field(default=0, ge=0)
 
 
 class ProbeResult(BaseModel):

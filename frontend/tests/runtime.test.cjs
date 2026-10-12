@@ -37,6 +37,23 @@ test('framing preview sends only source paths to the current backend and preserv
   } finally { global.window = previousWindow; global.fetch = previousFetch }
 })
 
+test('task resume posts the original task ID without resubmitting edited settings', async () => {
+  const previousWindow = global.window, previousFetch = global.fetch
+  try {
+    global.window = { electronAPI: { getBackendPort: async () => 54321 } }
+    let call
+    global.fetch = async (...args) => { call = args; return { ok: true, json: async () => ({ task_id: 'original-task' }) } }
+    const { api } = load('src/renderer/api/client.ts')
+    const result = await api.resumeTask('original-task')
+    assert.equal(result.task_id, 'original-task')
+    assert.equal(call[0], 'http://127.0.0.1:54321/api/tasks/original-task/resume')
+    assert.equal(call[1].method, 'POST')
+    assert.equal(call[1].body, undefined)
+    global.fetch = async () => ({ ok: false, status: 409, json: async () => ({ detail: '停止清理中' }) })
+    await assert.rejects(api.resumeTask('original-task'), /停止清理中/)
+  } finally { global.window = previousWindow; global.fetch = previousFetch }
+})
+
 test('source zoom defaults, persistence and ten-group migration preserve existing parameters', () => {
   let saved = null
   global.localStorage = { getItem: () => saved, setItem: (key, value) => { if (key === 'vm-config') saved = value } }

@@ -294,7 +294,10 @@ function parseFps(value: string | number) {
 }
 
 // ─── Task row ─────────────────────────────────────────────────────────────────
-function TaskRow({ task, stopping, onStop }: { task: TaskStatus; stopping: boolean; onStop: (task: TaskStatus) => void }) {
+function TaskRow({ task, stopping, resuming, onStop, onResume }: {
+  task: TaskStatus; stopping: boolean; resuming: boolean
+  onStop: (task: TaskStatus) => void; onResume: (task: TaskStatus) => void
+}) {
   const tone: Record<string, { bar: string; text: string; label: string }> = {
     pending:   { bar: 'bg-muted-foreground/40', text: 'text-muted-foreground', label: '等待' },
     running:   { bar: 'bg-accent',              text: 'text-accent',           label: '运行' },
@@ -304,6 +307,14 @@ function TaskRow({ task, stopping, onStop }: { task: TaskStatus; stopping: boole
     stopped:   { bar: 'bg-muted-foreground/40', text: 'text-muted-foreground', label: '停止' },
   }
   const t = tone[task.status] || tone.pending
+  const draining = stopping || Boolean(task.stopping)
+  const active = task.status === 'pending' || task.status === 'running'
+  const resumable = Boolean(task.can_resume) && ['stopped', 'partial', 'failed'].includes(task.status)
+  const resumeHint = draining ? '等待停止清理完成后再继续'
+    : active ? '任务正在运行'
+    : task.task_id.startsWith('benchmark-') ? '压测需重新开始，不续跑旧样本'
+    : resumable ? '沿用原任务参数，仅生成剩余视频；保留已产出结果'
+    : '没有可继续的剩余视频；仅支持本次打开软件时创建的生产任务'
   return (
     <div data-task-id={task.task_id} className="py-1.5 border-b border-border/[0.04] last:border-0">
       <div className="flex items-center gap-2">
@@ -327,17 +338,27 @@ function TaskRow({ task, stopping, onStop }: { task: TaskStatus; stopping: boole
             </span>
           </>
         )}
-        {(task.status === 'pending' || task.status === 'running') && (
+      </div>
+      <div className="mt-1 flex items-center gap-1.5">
           <button
             type="button"
             onClick={() => onStop(task)}
-            disabled={stopping}
+            disabled={!active || draining || resuming}
+            title={active ? '仅停止这个任务，保留已产出视频' : draining ? '正在停止并清理子进程' : '当前任务未运行'}
             aria-label={`停止任务 ${task.task_name}`}
-            className="shrink-0 rounded-[3px] border border-hot/30 px-1.5 py-1 text-[10px] leading-none text-hot hover:bg-hot/10 transition-colors disabled:opacity-50 disabled:cursor-wait"
+            className="h-6 min-w-[64px] shrink-0 cursor-pointer rounded-[3px] border border-hot/30 px-2 text-[10px] text-hot transition-colors hover:bg-hot/10 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {stopping ? '停止中…' : '停止'}
+            {draining ? '停止中…' : '停止'}
           </button>
-        )}
+          <button type="button" onClick={() => onResume(task)}
+            disabled={!resumable || draining || resuming} title={resumeHint}
+            aria-label={`继续任务 ${task.task_name}`}
+            className="h-6 min-w-[64px] shrink-0 cursor-pointer rounded-[3px] border border-accent/35 px-2 text-[10px] text-accent transition-colors hover:bg-accent/10 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40">
+            {resuming ? '继续中…' : '继续'}
+          </button>
+          <span className="min-w-0 text-[10px] text-muted-foreground">
+            {draining ? '等待子进程退出' : resumable && task.resume_remaining ? `剩余 ${task.resume_remaining} 个` : ''}
+          </span>
       </div>
       {task.message && (
         <div className={`mt-1 text-[10px] leading-4 break-words ${task.status === 'partial' ? 'text-accent' : 'text-muted-foreground'}`}>
@@ -355,6 +376,8 @@ export default function SinglePage() {
   const [isRunning, setIsRunning] = useState(false)
   const [stoppingTaskIds, setStoppingTaskIds] = useState<string[]>([])
   const stopRequestsRef = useRef(new Set<string>())
+  const [resumingTaskIds, setResumingTaskIds] = useState<string[]>([])
+  const resumeRequestsRef = useRef(new Set<string>())
   const [rightTab, setRightTab] = useState<'log' | 'tasks' | 'output' | 'variant'>('log')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('vm-theme') as 'dark' | 'light') || 'dark')
   const [benchmarkRunning, setBenchmarkRunning] = useState(false)
@@ -800,7 +823,7 @@ export default function SinglePage() {
 
   const stopOneTask = async (task: TaskStatus) => {
     const active = useStore.getState().tasks.find(item => item.task_id === task.task_id)
-    if (!active || !['pending', 'running'].includes(active.status) || stopRequestsRef.current.has(task.task_id)) return
+    if (!active || !['pending', 'running'].includes(active.status) || stopRequestsRef.current.has(task.task_id) || resumeRequestsRef.current.has(task.task_id)) return
     stopRequestsRef.current.add(task.task_id)
     setStoppingTaskIds(ids => [...ids, task.task_id])
     try {
@@ -821,6 +844,31 @@ export default function SinglePage() {
     } finally {
       stopRequestsRef.current.delete(task.task_id)
       setStoppingTaskIds(ids => ids.filter(id => id !== task.task_id))
+    }
+  }
+
+  const resumeOneTask = async (task: TaskStatus) => {
+    const active = useStore.getState().tasks.find(item => item.task_id === task.task_id)
+    if (!active?.can_resume || active.stopping || !['stopped', 'partial', 'failed'].includes(active.status)
+      || resumeRequestsRef.current.has(task.task_id) || stopRequestsRef.current.has(task.task_id)) return
+    resumeRequestsRef.current.add(task.task_id)
+    setResumingTaskIds(ids => [...ids, task.task_id])
+    try {
+      await api.resumeTask(task.task_id)
+      appendLog(`▸ ${new Date().toLocaleTimeString()} 继续任务：${task.task_name}，仅生成剩余视频`)
+      addToast(`已请求继续：${task.task_name}`, 'success')
+      try {
+        const updated = await api.getTask(task.task_id)
+        const state = useStore.getState()
+        state.setTasks(state.tasks.map(item => item.task_id === task.task_id ? updated : item))
+      } catch { addToast('继续指令已发送，任务状态将自动刷新', 'warning') }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      addToast(`继续失败：${task.task_name}。${message}`, 'error')
+      appendLog(`[错误] 继续 ${task.task_name} 失败：${message}`)
+    } finally {
+      resumeRequestsRef.current.delete(task.task_id)
+      setResumingTaskIds(ids => ids.filter(id => id !== task.task_id))
     }
   }
 
@@ -1290,7 +1338,8 @@ export default function SinglePage() {
                       暂无任务
                     </div>
                   ) : (
-                    tasks.slice().reverse().map(t => <TaskRow key={t.task_id} task={t} stopping={stoppingTaskIds.includes(t.task_id)} onStop={stopOneTask} />)
+                    tasks.slice().reverse().map(t => <TaskRow key={t.task_id} task={t} stopping={stoppingTaskIds.includes(t.task_id)}
+                      resuming={resumingTaskIds.includes(t.task_id)} onStop={stopOneTask} onResume={resumeOneTask} />)
                   )}
                 </div>
               )}

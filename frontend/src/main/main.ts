@@ -342,7 +342,7 @@ async function assertFilesystemIdle() {
     tasks = await response.json()
   } catch { throw new Error('无法确认混剪任务状态，暂不允许删除或改名。') }
   if (!Array.isArray(tasks)) throw new Error('混剪任务状态异常，暂不允许删除或改名。')
-  if (tasks.some(task => task.status === 'running' || task.status === 'pending')) throw new Error('有混剪任务正在运行或排队，请完成或停止任务后再删除、改名。')
+  if (tasks.some(task => task.status === 'running' || task.status === 'pending' || task.stopping)) throw new Error('有混剪任务正在运行、排队或停止清理，请等待结束后再删除、改名。')
 }
 const directoryActions = createDirectoryActions({
   assertIdle: assertFilesystemIdle,

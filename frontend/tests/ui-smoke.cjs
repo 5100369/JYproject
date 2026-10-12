@@ -25,6 +25,9 @@ async function main() {
     const taskGetCalls = []
     let pendingStopRoute = null
     let failNextStop = false
+    const taskResumeCalls = []
+    let failNextResume = false
+    let pendingResumeRoute = null
     const benchmarkCalls = []
     const preflightCalls = []
     let pendingBenchmarkRoute = null
@@ -65,6 +68,16 @@ async function main() {
           return route.fulfill({ status: 500, json: { detail: '测试停止失败' } })
         }
         pendingStopRoute = route
+        return
+      }
+      const taskResumeMatch = new URL(url).pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/)
+      if (taskResumeMatch && route.request().method() === 'POST') {
+        taskResumeCalls.push(taskResumeMatch[1])
+        if (failNextResume) {
+          failNextResume = false
+          return route.fulfill({ status: 409, json: { detail: '测试仍在清理，请稍后重试' } })
+        }
+        pendingResumeRoute = route
         return
       }
       const taskGetMatch = new URL(url).pathname.match(/^\/api\/tasks\/([^/]+)$/)
@@ -725,7 +738,8 @@ async function main() {
     const stopB = page.getByRole('button', { name: '停止任务 任务乙', exact: true })
     await stopA.waitFor()
     assert.equal(await stopB.isEnabled(), true)
-    assert.equal(await page.getByRole('button', { name: '停止任务 已完成任务', exact: true }).count(), 0)
+    assert.equal(await page.getByRole('button', { name: '停止任务 已完成任务', exact: true }).isDisabled(), true)
+    assert.equal(await page.getByRole('button', { name: '继续任务 已完成任务', exact: true }).isDisabled(), true)
     await stopA.click()
     await page.getByText('停止中…', { exact: true }).waitFor()
     assert.equal(await stopA.isDisabled(), true)
@@ -734,11 +748,12 @@ async function main() {
     assert.equal(await stopB.isEnabled(), true)
     assert.deepEqual(taskStopCalls, ['stop-a'])
     assert(pendingStopRoute)
-    taskFixtures[0] = { ...taskFixtures[0], status: 'stopped', message: '任务甲已停止' }
+    taskFixtures[0] = { ...taskFixtures[0], status: 'stopped', message: '任务甲已停止', stopping: true,
+      can_resume: false, resume_remaining: 1, current: 1, progress: 50, output_files: ['C:\\output\\任务甲已完成.mp4'] }
     await pendingStopRoute.fulfill({ json: { message: '停止指令已发送' } })
     pendingStopRoute = null
     await page.getByText('任务甲已停止', { exact: true }).waitFor()
-    assert.equal(await stopA.count(), 0)
+    assert.equal(await stopA.isDisabled(), true)
     assert.deepEqual(taskGetCalls, ['stop-a'])
     assert.deepEqual(taskStopCalls, ['stop-a'])
     assert.equal(await stopB.isEnabled(), true)
@@ -748,6 +763,38 @@ async function main() {
     assert.equal(await stopB.isEnabled(), true)
     assert.deepEqual(taskStopCalls, ['stop-a', 'stop-b'])
     assert.equal(taskFixtures[1].status, 'pending')
+    const resumeA = page.getByRole('button', { name: '继续任务 任务甲', exact: true })
+    assert.equal(await resumeA.isDisabled(), true)
+    await page.getByText('等待子进程退出', { exact: true }).waitFor()
+    // Resume is enabled only when the backend reports every old worker drained.
+    taskFixtures[0] = { ...taskFixtures[0], stopping: false, can_resume: true }
+    await page.getByText('剩余 1 个', { exact: true }).waitFor()
+    assert.equal(await resumeA.isEnabled(), true)
+    await page.screenshot({ path: path.resolve(__dirname, '../dist/ui-task-resume-light.png') })
+    await page.getByRole('button', { name: 'Dark', exact: true }).click()
+    await page.screenshot({ path: path.resolve(__dirname, '../dist/ui-task-resume-dark.png') })
+    await page.getByRole('button', { name: 'Light', exact: true }).click()
+    // An API conflict keeps the same outputs/status and allows retry.
+    failNextResume = true
+    await resumeA.click()
+    await page.getByRole('status').filter({ hasText: '继续失败：任务甲。测试仍在清理，请稍后重试' }).waitFor()
+    assert.equal(await resumeA.isEnabled(), true)
+    assert.deepEqual(taskFixtures[0].output_files, ['C:\\output\\任务甲已完成.mp4'])
+    await resumeA.click()
+    await page.getByText('继续中…', { exact: true }).waitFor()
+    await resumeA.evaluate(button => button.click())
+    assert.equal(await resumeA.isDisabled(), true)
+    assert.equal(await stopB.isEnabled(), true, 'other tasks stay independently stoppable')
+    assert.deepEqual(taskResumeCalls, ['stop-a', 'stop-a'])
+    assert(pendingResumeRoute)
+    taskFixtures[0] = { ...taskFixtures[0], status: 'running', can_resume: false, message: '任务甲继续生成剩余视频' }
+    await pendingResumeRoute.fulfill({ json: { task_id: 'stop-a', message: '已继续原任务' } })
+    pendingResumeRoute = null
+    await page.getByText('任务甲继续生成剩余视频', { exact: true }).waitFor()
+    assert.equal(await stopA.isEnabled(), true)
+    assert.equal(await resumeA.isDisabled(), true)
+    assert.deepEqual(taskFixtures[0].output_files, ['C:\\output\\任务甲已完成.mp4'])
+    assert.deepEqual(taskGetCalls, ['stop-a', 'stop-a'])
     await page.screenshot({ path: path.resolve(__dirname, '../dist/ui-task-stop-light.png') })
     // Production and benchmarking must not compete; preserve the existing stop isolation assertions above.
     const benchmarkButton = page.getByRole('button', { name: '智能压测', exact: true })
@@ -780,6 +827,7 @@ async function main() {
     await pendingStopRoute.fulfill({ json: { message: '停止指令已发送' } })
     pendingStopRoute = null
     await page.getByText('测试压测已停止', { exact: true }).waitFor()
+    assert.equal(await page.getByRole('button', { name: '继续任务 智能压测回归 1', exact: true }).isDisabled(), true)
     await pendingBenchmarkRoute.fulfill({ json: { error: '用户已停止压测', cancelled: true, best_concurrent: null, results: {} } })
     pendingBenchmarkRoute = null
     await benchmarkButton.waitFor()

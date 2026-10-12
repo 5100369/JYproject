@@ -75,6 +75,19 @@ def stop_all_tasks():
     return {"message": "停止指令已发送", "stopped": stopped}
 
 
+@router.post('/tasks/{task_id}/resume', response_model=CreateTaskResponse)
+def resume_task(task_id: str):
+    try:
+        success = task_service.resume_task(task_id)
+    except TaskBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not success:
+        raise HTTPException(status_code=404, detail='任务不存在')
+    return CreateTaskResponse(task_id=task_id, message='已继续原任务，仅生成剩余视频')
+
+
 @router.get("/tasks/{task_id}/logs")
 def get_logs(task_id: str):
     task = task_service.get_task(task_id)
