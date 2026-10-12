@@ -44,10 +44,18 @@ jobs:
       - name: Download FFmpeg static build
         run: |
           mkdir -p backend/ffmpeg
-          curl -L https://evermeet.cx/ffmpeg/getrelease/zip  -o ffmpeg.zip
-          curl -L https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip -o ffprobe.zip
-          unzip -o ffmpeg.zip  -d backend/ffmpeg
-          unzip -o ffprobe.zip -d backend/ffmpeg
+          for tool in ffmpeg ffprobe; do
+            url="https://evermeet.cx/ffmpeg/getrelease/zip"
+            if [ "$tool" = ffprobe ]; then url="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"; fi
+            for attempt in 1 2 3; do
+              if curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 --max-time 180 "$url" -o "$tool.zip" && unzip -tq "$tool.zip"; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then echo "Invalid $tool archive after retries"; exit 1; fi
+              sleep 3
+            done
+            unzip -o "$tool.zip" -d backend/ffmpeg
+          done
           chmod +x backend/ffmpeg/ffmpeg backend/ffmpeg/ffprobe
 
       - name: Test backend regressions
