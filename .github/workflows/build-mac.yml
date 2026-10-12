@@ -46,13 +46,17 @@ jobs:
           mkdir -p backend/ffmpeg
           for tool in ffmpeg ffprobe; do
             url="https://evermeet.cx/ffmpeg/getrelease/zip"
-            if [ "$tool" = ffprobe ]; then url="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"; fi
+            if [ "$tool" = ffprobe ]; then
+              url="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+              # The download mirror rate-limits consecutive large requests.
+              sleep 60
+            fi
             for attempt in 1 2 3; do
-              if curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 --max-time 180 "$url" -o "$tool.zip" && unzip -tq "$tool.zip"; then
+              if curl --fail --location --retry 5 --retry-delay 60 --retry-max-time 600 --retry-all-errors --connect-timeout 20 --max-time 180 "$url" -o "$tool.zip" && unzip -tq "$tool.zip"; then
                 break
               fi
               if [ "$attempt" = 3 ]; then echo "Invalid $tool archive after retries"; exit 1; fi
-              sleep 3
+              sleep 60
             done
             unzip -o "$tool.zip" -d backend/ffmpeg
           done
