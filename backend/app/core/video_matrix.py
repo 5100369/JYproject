@@ -18,6 +18,7 @@ from .ffmpeg import (
     render_video
 )
 from .timeline import apply_timeline_totals, body_segment_specs
+from .source_framing import source_crop_filter
 from .bgm_tracks import configured_tracks, prepare_track, track_filter, TRACK_LABELS
 from .output_settings import resolve_output_config, validate_output_settings, parse_resolution
 
@@ -808,10 +809,11 @@ class VideoMatrixCore:
         filter_complex = ""
         for i, clip in enumerate(clips):
             start, dur, clip_has_audio = clip['start'] - seek_offsets[i], clip['duration'], clip.get('has_audio', False)
+            framing = source_crop_filter(cfg, i == 0)
             base_normalization = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format=yuv420p"
             prefix = (
                 f"[{i}:v]trim=start={start}:duration={dur},setpts=PTS-STARTPTS,"
-                f"fps={fps_val},"
+                f"fps={fps_val},{framing}"
             )
             original = f"{prefix}{base_normalization}[v{i}]; "
             transformed = f"{prefix}{variant_segments.get(i, base_normalization)}[v{i}]; "

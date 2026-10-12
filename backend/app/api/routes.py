@@ -1,17 +1,42 @@
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import asyncio
 import json
 
 from ..models.schemas import (
     CreateTaskRequest, CreateTaskResponse, StopTaskRequest,
-    TaskStatus, ScanRequest, ScanResponse, ProbeResult, VideoConfig
+    TaskStatus, ScanRequest, ScanResponse, ProbeResult, VideoConfig, FramingPreviewRequest
 )
 from ..services.task_service import task_service, TaskBusyError
 from ..core.ffmpeg import probe_media, extract_media_info, extract_audio_duration
 
 router = APIRouter()
+
+
+@router.post('/framing/preview')
+async def framing_preview(payload: FramingPreviewRequest, request: Request):
+    import threading
+    from ..core.framing_preview import generate_framing_preview, PreviewBusyError
+    cancelled = threading.Event()
+    worker = asyncio.create_task(asyncio.to_thread(generate_framing_preview, payload.paths, cancelled.is_set))
+    try:
+        while not worker.done():
+            if await request.is_disconnected():
+                cancelled.set()
+                raise HTTPException(status_code=499, detail='预览已取消')
+            await asyncio.wait({worker}, timeout=.15)
+        return worker.result()
+    except PreviewBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except InterruptedError as exc:
+        raise HTTPException(status_code=499, detail='预览已取消') from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        cancelled.set()
+        # A disconnected client must not leave an unobserved worker exception.
+        worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
 
 @router.post("/tasks", response_model=CreateTaskResponse)

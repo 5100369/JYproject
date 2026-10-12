@@ -28,9 +28,23 @@ async function main() {
     const benchmarkCalls = []
     const preflightCalls = []
     let pendingBenchmarkRoute = null
+    const previewCalls = []
+    let failNextPreview = false
+    let deferPreview = false
+    let pendingPreviewRoute = null
+    const previewImage = 'data:image/svg+xml;base64,' + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="540" height="960"><rect width="540" height="960" fill="#dd6c43"/><rect x="90" y="160" width="360" height="640" fill="#233e5b"/><circle cx="270" cy="400" r="90" fill="#e6bd68"/><text x="270" y="640" text-anchor="middle" font-size="34" fill="white">素材主体</text></svg>').toString('base64')
     page.on('pageerror', error => errors.push(error.message))
     await page.route('**/api/**', route => {
       const url = route.request().url()
+      if (new URL(url).pathname === '/api/framing/preview') {
+        previewCalls.push(route.request().postDataJSON())
+        if (deferPreview) { pendingPreviewRoute = route; return }
+        if (failNextPreview) {
+          failNextPreview = false
+          return route.fulfill({ status: 400, json: { detail: '测试素材取帧失败，请重试' } })
+        }
+        return route.fulfill({ json: { image_url: previewImage, file_path: 'C:\\assets\\sample.mp4', time_seconds: 2.34 } })
+      }
       if (new URL(url).pathname === '/api/preflight' && route.request().method() === 'POST') {
         preflightCalls.push(route.request().postDataJSON())
         return route.fulfill({ json: { ok: true, capacity: 100, report: [] } })
@@ -64,6 +78,99 @@ async function main() {
       return route.fulfill({ json: body })
     })
     await page.goto(`http://127.0.0.1:${server.address().port}`)
+    async function assertFramingAlignment(theme, mode) {
+      const hook = page.getByRole('button', { name: 'Hook画面设置', exact: true })
+      const body = page.getByRole('button', { name: 'Body画面设置', exact: true })
+      const h = await hook.boundingBox(), b = await body.boundingBox()
+      assert(h && b && Math.abs(h.x - b.x) < 1, 'Hook / Body settings must align horizontally')
+      assert.equal(h.height, b.height)
+      for (const [scope, button] of [['Hook', hook], ['Body', body]]) {
+        assert.equal(await button.locator(`xpath=ancestor::*[@aria-label="${scope}素材设置栏"]`).count(), 1)
+      }
+      assert.equal(await hook.count(), 1)
+      assert.equal(await body.count(), 1)
+      await page.screenshot({ path: path.resolve(__dirname, `../dist/ui-source-layout-${theme}-${mode}.png`) })
+    }
+    await assertFramingAlignment('dark', 'normal')
+    async function exerciseFraming(theme) {
+      const hookPath = page.getByRole('textbox', { name: 'Hook 首段', exact: true })
+      const originalHookPath = await hookPath.inputValue()
+      if (theme === 'dark') {
+        await page.getByRole('button', { name: 'Hook画面设置', exact: true }).click()
+        const emptySettings = page.getByRole('dialog', { name: 'Hook 素材放大裁切', exact: true })
+        await emptySettings.getByRole('button', { name: 'Hook预览', exact: true }).click()
+        assert.equal(await emptySettings.getByRole('alert').innerText(), '请先选择 Hook 素材目录')
+        assert.equal(previewCalls.length, 0)
+        await page.keyboard.press('Escape')
+      }
+      await hookPath.fill('C:\\assets\\framing-preview')
+      for (const [scope, percent] of [['Hook', '150'], ['Body', '200']]) {
+        const button = page.getByRole('button', { name: `${scope}画面设置`, exact: true })
+        const requestsBefore = previewCalls.length
+        await button.click()
+        const settings = page.getByRole('dialog', { name: `${scope} 素材放大裁切`, exact: true })
+        await settings.waitFor()
+        assert.equal(previewCalls.length, requestsBefore, 'opening settings must not read video')
+        await settings.getByRole('button', { name: `${scope}预览`, exact: true }).click()
+        const currentImage = settings.getByRole('img', { name: `${scope}放大裁切预览`, exact: true })
+        await currentImage.waitFor()
+        assert.equal(previewCalls.length, requestsBefore + 1)
+        const currentConfig = await page.evaluate(() => JSON.parse(localStorage.getItem('vm-config')))
+        assert.deepEqual(previewCalls.at(-1).paths, scope === 'Hook' || !currentConfig.body_dirs.length
+          ? ['C:\\assets\\framing-preview'] : currentConfig.body_dirs)
+        const input = settings.getByRole('spinbutton', { name: `${scope}放大比例百分比`, exact: true })
+        await input.fill('300')
+        await settings.getByRole('heading').click()
+        await input.fill('99')
+        await settings.getByRole('heading').click()
+        assert.equal(await settings.getByRole('alert').isVisible(), true)
+        assert.equal(await page.evaluate(scope => JSON.parse(localStorage.getItem('vm-config'))[`${scope.toLowerCase()}_zoom_percent`], scope), 300)
+        await input.fill(percent)
+        await settings.getByRole('heading').click()
+        assert.equal(await settings.getByRole('alert').count(), 0)
+        assert.equal(await input.inputValue(), percent)
+        assert.equal(await currentImage.evaluate(img => img.style.transform), `scale(${Number(percent) / 100})`)
+        assert.equal(previewCalls.length, requestsBefore + 1, 'editing zoom must not decode or request another frame')
+        const bounds = await settings.boundingBox()
+        assert(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 1440 && bounds.y + bounds.height <= 1080)
+        if (scope === 'Body') {
+          await settings.getByRole('button', { name: '恢复 100%', exact: true }).click()
+          assert.equal(await input.inputValue(), '100')
+          const slider = settings.getByRole('slider', { name: 'Body放大比例', exact: true })
+          await slider.focus()
+          await page.keyboard.press('ArrowRight')
+          assert.equal(await input.inputValue(), '101')
+          await input.fill(percent)
+          await settings.getByRole('heading').click()
+        }
+        await settings.screenshot({ path: path.resolve(__dirname, `../dist/ui-framing-${scope.toLowerCase()}-${theme}.png`) })
+        failNextPreview = true
+        await settings.getByRole('button', { name: `${scope}换一帧`, exact: true }).click()
+        await settings.getByRole('alert').waitFor()
+        assert.match(await settings.getByRole('alert').innerText(), /取帧失败/)
+        assert.equal(await currentImage.isVisible(), true, 'a failed refresh keeps the previous good frame')
+        await settings.getByRole('button', { name: `${scope}换一帧`, exact: true }).click()
+        await settings.getByRole('alert').waitFor({ state: 'detached' })
+        await page.keyboard.press('Escape')
+        assert.equal(await settings.isVisible(), false)
+        assert.equal(await button.evaluate(el => el === document.activeElement), true)
+      }
+      const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('vm-config')))
+      assert.equal(saved.hook_zoom_percent, 150)
+      assert.equal(saved.body_zoom_percent, 200)
+      // Closing a pending request must not allow its late result to reappear.
+      deferPreview = true
+      await page.getByRole('button', { name: 'Hook画面设置', exact: true }).click()
+      const pendingSettings = page.getByRole('dialog', { name: 'Hook 素材放大裁切', exact: true })
+      await pendingSettings.getByRole('button', { name: 'Hook换一帧', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('[role="status"]')?.textContent.includes('正在读取素材'))
+      await page.keyboard.press('Escape')
+      if (pendingPreviewRoute) await pendingPreviewRoute.fulfill({ json: { image_url: previewImage, file_path: 'late.mp4', time_seconds: 0 } }).catch(() => {})
+      pendingPreviewRoute = null
+      deferPreview = false
+      await hookPath.fill(originalHookPath)
+    }
+    await exerciseFraming('dark')
     const nativeResultsPath = path.resolve(__dirname, '../dist/native-thumbnail-results.json')
     const nativeResults = fs.existsSync(nativeResultsPath) ? JSON.parse(fs.readFileSync(nativeResultsPath, 'utf8')) : null
     await page.evaluate(nativeResults => {
@@ -434,6 +541,8 @@ async function main() {
     assert.equal(await page.getByRole('dialog', { name: '简易教程' }).isVisible(), false)
     assert.equal(await page.getByRole('button', { name: '简易教程', exact: true }).evaluate(el => el === document.activeElement), true)
     await page.getByRole('button', { name: 'Light', exact: true }).click()
+    await exerciseFraming('light')
+    await assertFramingAlignment('light', 'normal')
     await hookBrowse.click()
     await picker.getByText('inside-folder.mp4', { exact: true }).waitFor()
     await page.screenshot({ path: path.resolve(__dirname, '../dist/ui-directory-details-light.png') })
@@ -448,6 +557,27 @@ async function main() {
     assert.equal(await page.getByRole('textbox', { name: '后段', exact: true }).isEnabled(), true)
     await page.getByRole('button', { name: '分组', exact: true }).click()
     await page.getByRole('checkbox', { name: 'Body 1 按原素材时长', exact: true }).click()
+    const addGroup = page.getByRole('button', { name: '添加Body分组', exact: true })
+    for (let i = 4; i < 10; i++) await addGroup.click()
+    assert.equal(await addGroup.isDisabled(), true)
+    const groupTen = page.getByRole('switch', { name: '组 10', exact: true })
+    assert.equal(await groupTen.isVisible(), true)
+    await groupTen.click()
+    const lastFolder = groupTen.locator('..').locator('input').first()
+    await lastFolder.fill('C:\\assets\\Group B')
+    assert.equal(await page.getByRole('checkbox', { name: 'Body 10 按原素材时长', exact: true }).isVisible(), true)
+    const groupedSaved = await page.evaluate(() => JSON.parse(localStorage.getItem('vm-config')))
+    assert.equal(groupedSaved.body_groups.length, 10)
+    assert.equal(groupedSaved.body_groups[9].folder, 'C:\\assets\\Group B')
+    await assertFramingAlignment('light', 'grouped')
+    await page.getByRole('button', { name: 'Body画面设置', exact: true }).click()
+    const groupedSettings = page.getByRole('dialog', { name: 'Body 素材放大裁切', exact: true })
+    await groupedSettings.getByRole('button', { name: 'Body预览', exact: true }).click()
+    await groupedSettings.getByRole('img', { name: 'Body放大裁切预览', exact: true }).waitFor()
+    assert.deepEqual(previewCalls.at(-1).paths, groupedSaved.body_groups.filter(g => g.enabled && g.folder).map(g => g.folder))
+    await page.keyboard.press('Escape')
+    await groupTen.click()
+    await page.screenshot({ path: path.resolve(__dirname, '../dist/ui-ten-body-groups-light.png') })
     assert.equal(await page.getByRole('spinbutton', { name: 'Body 1 每段时长', exact: true }).isDisabled(), true)
     assert.equal(await page.getByRole('spinbutton', { name: 'Body 2 每段时长', exact: true }).isEnabled(), true)
     await page.getByRole('checkbox', { name: 'Body 1 按原素材时长', exact: true }).click()

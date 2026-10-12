@@ -25,7 +25,9 @@ class VideoConfig(BaseModel):
     hook_dir: str = Field(..., description="首段素材目录")
     body_dirs: List[str] = Field(default_factory=list, description="后段素材目录列表")
     body_mode: Literal["normal", "grouped"] = Field(default="normal", description="后段拼接模式")
-    body_groups: List["BodyGroup"] = Field(default_factory=list, max_length=4, description="按顺序拼接的 Body 分组")
+    body_groups: List["BodyGroup"] = Field(default_factory=list, max_length=10, description="按顺序拼接的 Body 分组，最多 10 组")
+    hook_zoom_percent: float = Field(default=100, ge=100, le=300, description="Hook 居中放大比例(%)")
+    body_zoom_percent: float = Field(default=100, ge=100, le=300, description="普通及全部分组 Body 居中放大比例(%)")
     bgm_dir: str = Field(default="", description="可选 BGM 目录或带音轨的视频文件")
     bgm_tracks: Optional[BgmTracks] = Field(default=None, description="全片 / Hook / Body 三条独立配乐；未提供时兼容旧接口")
     duration_mode: Literal["clips", "bgm"] = Field(default="clips", description="按片段数量或完整 BGM 时长生成")
@@ -110,6 +112,10 @@ class VideoConfig(BaseModel):
         from ..core.output_settings import validate_output_settings
         validate_output_settings(self.model_dump())
         return self
+
+
+class FramingPreviewRequest(BaseModel):
+    paths: List[str] = Field(min_length=1, max_length=128)
 
 
 class BodyGroup(BaseModel):

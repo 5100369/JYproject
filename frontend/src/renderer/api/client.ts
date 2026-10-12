@@ -9,6 +9,7 @@ const getBaseUrl = async (): Promise<string> => {
 function formatApiError(detail: unknown, fallback: string): string {
   const fieldLabels: Record<string, string> = {
     hook_r: 'Hook 重叠率', body_r: 'Body 重叠率', bgm_r: 'BGM 重叠率',
+    hook_zoom_percent: 'Hook 放大比例', body_zoom_percent: 'Body 放大比例',
     t_hook: '首段时长', t_body: '后段时长', total_clips: '片段数',
     target_count: '生成数量', concurrent_tasks: '并发数', vol_hook_orig: 'Hook 原声音量',
     random_resolution_min: '随机分辨率短边下限', random_resolution_max: '随机分辨率短边上限',
@@ -73,6 +74,8 @@ export interface VideoConfig {
   body_dirs: string[]
   body_mode: 'normal' | 'grouped'
   body_groups: BodyGroup[]
+  hook_zoom_percent: string | number
+  body_zoom_percent: string | number
   bgm_dir: string
   bgm_tracks?: BgmTracks
   finished_hook?: boolean
@@ -198,7 +201,14 @@ export function normalizeConfigForRequest(config: VideoConfig): VideoConfig {
   const randomOutputError = validateRandomOutputConfig(normalized)
   if (randomOutputError) throw new Error(randomOutputError)
   normalized.body_mode = config.body_mode === 'grouped' ? 'grouped' : 'normal'
-  const normalizedGroups = (config.body_groups || []).slice(0, 4).map((group) => {
+  for (const scope of ['hook', 'body'] as const) {
+    const key = `${scope}_zoom_percent` as const
+    const percent = config[key] == null ? 100 : Number(config[key])
+    if (!Number.isFinite(percent) || percent < 100 || percent > 300) throw new Error(`${scope === 'hook' ? 'Hook' : 'Body'} 放大比例须为 100–300%`)
+    normalized[key] = percent
+  }
+  if ((config.body_groups || []).length > 10) throw new Error('Body 分组最多 10 组')
+  const normalizedGroups = (config.body_groups || []).slice(0, 10).map((group) => {
     const safeGroup = group || {} as BodyGroup
     const clipCount = Number(safeGroup.clip_count)
     const clipDuration = Number(safeGroup.clip_duration)
@@ -281,7 +291,16 @@ export interface TaskStatus {
   effective_concurrency?: number
 }
 
+export interface FramingPreview {
+  image_url: string
+  file_path: string
+  time_seconds: number
+}
+
 export const api = {
+  framingPreview: (paths: string[], signal?: AbortSignal) => request<FramingPreview>('/framing/preview', {
+    method: 'POST', body: JSON.stringify({ paths }), signal,
+  }),
   health: () => request<{ status: string }>('/health'),
 
   createTask: (config: VideoConfig) =>

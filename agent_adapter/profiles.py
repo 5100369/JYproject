@@ -10,6 +10,8 @@ BASE_CONFIG: dict[str, Any] = {
     "body_dirs": [],
     "body_mode": "normal",
     "body_groups": [],
+    "hook_zoom_percent": 100,
+    "body_zoom_percent": 100,
     "enable_random_cover": False,
     "random_cover_mode": "replace",
     "bgm_dir": "",

@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from app.core.ffmpeg import FFMPEG, probe_media, render_video, run_process
 from app.core.video_cover import prepare_cover_frame
+from app.core.source_framing import source_crop_filter
 from app.core.video_matrix import SharedMediaCache, VideoMatrixCore
 from app.models.schemas import TaskStatus
 from app.services.task_service import TaskService
@@ -141,6 +142,72 @@ class FusedCoverTests(unittest.TestCase):
         for index in range(3):
             self.assertNotIn(f'[{index}:a]', graph)
             self.assertIn(f'[{index + 3}:a]', graph)
+
+    def test_manual_zoom_removes_source_border_without_changing_audio_or_duration(self):
+        source = self.root / 'framing-border.mp4'
+        subprocess.run([
+            FFMPEG, '-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            'color=red:s=160x96:r=24:d=2,drawbox=x=40:y=24:w=80:h=48:color=blue:t=fill',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source),
+        ], check=True, capture_output=True)
+        outputs = []
+        for percent in (100, 200):
+            core = self.core(f'framing-{percent}', enable_random_cover=False,
+                             t_hook=.5, hook_zoom_percent=percent, body_zoom_percent=100)
+            core.hook_pool = [dict(file=str(source), start=0., duration=.5, has_audio=False)]
+            output, commands = self.render(core)
+            self.assertEqual(len(commands), 1)
+            graph = commands[0][commands[0].index('-filter_complex') + 1]
+            self.assertEqual(graph.count('scale='), 3)
+            outputs.append(output)
+        self.assertEqual(audio_hash(outputs[0]), audio_hash(outputs[1]))
+        self.assertEqual(self.stream(outputs[0])['nb_frames'], self.stream(outputs[1])['nb_frames'])
+        before, after = frame_bytes(outputs[0], 0), frame_bytes(outputs[1], 0)
+        self.assertGreater(sum(before[0::3]) / len(before[0::3]), 100)
+        self.assertLess(sum(after[0::3]) / len(after[0::3]), 20)
+        self.assertGreater(sum(after[2::3]) / len(after[2::3]), 230)
+
+    def test_ten_groups_render_in_order_with_one_scale_per_clip(self):
+        groups = [dict(enabled=True, folder=f'group-{i}', clip_count=1, clip_duration=.5)
+                  for i in range(10)]
+        core = self.core('ten-groups', enable_random_cover=False, t_hook=.5,
+                         body_mode='grouped', body_groups=groups,
+                         hook_zoom_percent=150, body_zoom_percent=200)
+        core.hook_pool[0]['duration'] = .5
+        core.body_group_pools = [[dict(file=str(self.source), start=(i % 6) * .5,
+                                     duration=.5, has_audio=True)] for i in range(10)]
+        output, commands = self.render(core)
+        self.assertEqual(len(commands), 1)
+        graph = commands[0][commands[0].index('-filter_complex') + 1]
+        self.assertEqual(graph.count('scale='), 11)
+        self.assertEqual(graph.count(source_crop_filter(core.config, False)), 10)
+        self.assertIn(''.join(f'[v{i}][a{i}]' for i in range(11)), graph)
+        self.assertEqual(int(self.stream(output)['nb_frames']), 132)
+
+    def test_cover_uses_selected_scope_zoom_and_keeps_selection_seed(self):
+        core = self.core('cover-framing', hook_zoom_percent=200, body_zoom_percent=150)
+        clips = [dict(file=str(self.source), start=0., duration=.5),
+                 dict(file=str(self.source), start=2.4, duration=.5)]
+        for random_value, is_hook in ((.1, True), (.9, False)):
+            with self.subTest(is_hook=is_hook), \
+                 patch('app.core.video_cover.random.Random.random', return_value=random_value), \
+                 patch('app.core.video_cover.run_process', wraps=run_process) as extraction:
+                _, result = prepare_cover_frame(clips, core.config, 1, core.temp_dir_path)
+                command = extraction.call_args.args[0]
+                self.assertTrue(command[command.index('-vf') + 1].startswith(source_crop_filter(core.config, is_hook)))
+                _, baseline = prepare_cover_frame(clips, dict(core.config, hook_zoom_percent=100, body_zoom_percent=100), 1, core.temp_dir_path)
+                self.assertEqual(result['source_time'], baseline['source_time'])
+                self.assertEqual(result['zoom'], baseline['zoom'])
+
+    def test_variant_fallback_retains_user_framing(self):
+        core = self.core('framing-fallback', enable_random_cover=False, enable_variants=True, variant_color=True,
+                         hook_zoom_percent=200, body_zoom_percent=150)
+        _, commands = self.render(core, failures=1)
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            graph = command[command.index('-filter_complex') + 1]
+            self.assertIn(source_crop_filter(core.config, True), graph)
+            self.assertEqual(graph.count(source_crop_filter(core.config, False)), 2)
 
     def test_silent_grouped_full_length_body_with_insert(self):
         core = self.core('silent-grouped', random_cover_mode='insert', vol_orig=0,

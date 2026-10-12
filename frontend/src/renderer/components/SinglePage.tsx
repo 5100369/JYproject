@@ -5,6 +5,7 @@ import { Checkbox } from './ui/checkbox'
 import { Slider } from './ui/slider'
 import { SubtitlePreview } from './SubtitlePreview'
 import { AssetCard } from './AssetCard'
+import { SourceFramingSettings } from './SourceFramingSettings'
 import { FeatureHelp } from './FeatureHelp'
 import { BgmPanel } from './BgmPanel'
 import { useDirectoryPicker } from './DirectoryPicker'
@@ -86,6 +87,22 @@ function Group({ title, children, className = '', action }: { title: React.React
 }
 
 // ─── Text parameter row (compact) ─────────────────────────────────────────────
+function SourceSectionHeader({ scope, settings, children, summary }: {
+  scope: 'Hook' | 'Body'; settings: React.ReactNode; children?: React.ReactNode; summary?: React.ReactNode
+}) {
+  return <div aria-label={`${scope}素材设置栏`} className="flex items-center justify-between gap-2 px-0.5">
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="inline-flex w-[104px] shrink-0 items-center whitespace-nowrap text-[11px] text-foreground/85">
+        {scope} {scope === 'Hook' ? '首段' : '后段'}
+        <FeatureHelp topic={scope.toLowerCase()} title={scope === 'Hook' ? 'Hook 首段' : 'Body 分组'} />
+      </span>
+      {settings}
+      {children}
+    </div>
+    {summary}
+  </div>
+}
+
 function ParamRow({ label, value, suffix, onChange, placeholder, disabled = false }: {
   label: string
   value: string | number
@@ -239,12 +256,12 @@ function BodyGroupRow({ index, group, onChange, onBrowse, onOpen }: {
         组 {index + 1}
       </button>
       <div className="flex min-w-0 items-center gap-1">
-        <input value={group.folder} onChange={(e) => onChange({ folder: e.target.value })} placeholder="Body 文件夹"
+        <input aria-label={`Body ${index + 1} 文件夹`} value={group.folder} onChange={(e) => onChange({ folder: e.target.value })} placeholder="Body 文件夹"
           className="h-6 min-w-0 flex-1 rounded-[4px] border border-border/[0.10] bg-background-elev px-2 font-mono text-[10px] text-foreground outline-none placeholder:text-muted-foreground/55 focus:border-accent/70" />
         <button type="button" onClick={onOpen} disabled={!group.folder} title="打开路径" className="h-6 w-6 shrink-0 rounded-[4px] border border-border/[0.08] text-[10px] text-muted-foreground hover:text-accent disabled:opacity-35">开</button>
         <button type="button" onClick={onBrowse} className="h-6 shrink-0 rounded-[4px] border border-border/[0.08] px-1.5 text-[9px] text-foreground/85 hover:border-accent/50 hover:text-accent">浏览</button>
       </div>
-      <input type="number" min="1" step="1" value={String(group.clip_count)} onChange={(e) => onChange({ clip_count: e.target.value })} inputMode="numeric" title="片段数（至少 1）" placeholder="片段"
+      <input aria-label={`Body ${index + 1} 片段数量`} type="number" min="1" step="1" value={String(group.clip_count)} onChange={(e) => onChange({ clip_count: e.target.value })} inputMode="numeric" title="片段数（至少 1）" placeholder="片段"
         className="h-6 min-w-0 rounded-[4px] border border-border/[0.10] bg-background-elev px-1.5 text-center font-mono text-[10px] text-foreground outline-none focus:border-accent/70" />
       <input disabled={group.full_duration} aria-label={`Body ${index + 1} 每段时长`} style={{ opacity: group.full_duration ? .4 : 1 }} type="number" min="0.5" step="0.1" value={String(group.clip_duration)} onChange={(e) => onChange({ clip_duration: e.target.value })} inputMode="decimal" title="每段时长（秒，至少 0.5）" placeholder="秒"
         className="h-6 min-w-0 rounded-[4px] border border-border/[0.10] bg-background-elev px-1.5 text-center font-mono text-[10px] text-foreground outline-none focus:border-accent/70" />
@@ -890,14 +907,21 @@ export default function SinglePage() {
               </button>
             )}>
               <div className="grid grid-cols-1 gap-1.5">
-                <AssetCard kind="hook"      label="Hook 首段" value={config.hook_dir}             count={scannedFiles.hook?.count} required
-                  onChange={(v) => setConfig({ hook_dir: v })}
-                  onOpen={() => openConfiguredPath(config.hook_dir)}
-                  onBrowse={() => browse('hook_dir')}        onClear={() => setConfig({ hook_dir: '' })} />
                 <div className="space-y-1 rounded-[6px] border border-border/[0.07] bg-foreground/[0.012] p-1.5">
-                  <div className="flex items-center justify-between gap-2 px-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-foreground/85">Body 后段<FeatureHelp topic="body" title="Body 分组" /></span>
+                  <SourceSectionHeader scope="Hook" settings={
+                    <SourceFramingSettings scope="Hook" value={config.hook_zoom_percent} onChange={value => setConfig({ hook_zoom_percent: value })} paths={[config.hook_dir]} resolution={config.resolution} />
+                  } />
+                  <AssetCard kind="hook" label="文件夹" inputLabel="Hook 首段" value={config.hook_dir} count={scannedFiles.hook?.count} required
+                    onChange={(v) => setConfig({ hook_dir: v })}
+                    onOpen={() => openConfiguredPath(config.hook_dir)}
+                    onBrowse={() => browse('hook_dir')} onClear={() => setConfig({ hook_dir: '' })} />
+                </div>
+                <div className="space-y-1 rounded-[6px] border border-border/[0.07] bg-foreground/[0.012] p-1.5">
+                  <SourceSectionHeader scope="Body" settings={
+                    <SourceFramingSettings scope="Body" value={config.body_zoom_percent} onChange={value => setConfig({ body_zoom_percent: value })}
+                        paths={config.body_mode === 'grouped' ? enabledBodyGroups.map(group => group.folder).filter(Boolean) : config.body_dirs.length ? config.body_dirs : [config.hook_dir]}
+                        resolution={config.resolution} />
+                  } summary={config.body_mode === 'grouped' && <span className="shrink-0 font-mono text-[9px] text-accent">共 {groupedClipCount} 段 · {durationLabel}</span>}>
                       <div className="flex items-center rounded-[4px] border border-border/[0.08] p-0.5">
                         {(['normal', 'grouped'] as const).map((mode) => (
                           <button key={mode} type="button" onClick={() => setConfig({ body_mode: mode })}
@@ -906,9 +930,7 @@ export default function SinglePage() {
                           </button>
                         ))}
                       </div>
-                    </div>
-                    {config.body_mode === 'grouped' && <span className="font-mono text-[9px] text-accent">共 {groupedClipCount} 段 · {durationLabel}</span>}
-                  </div>
+                  </SourceSectionHeader>
                   {config.body_mode === 'normal' ? (
                     <AssetCard kind="body" label="文件夹" value={config.body_dirs.join('; ')} count={scannedFiles.body?.count} pickAction="追加"
                       onChange={(v) => setConfig({ body_dirs: splitPathList(v) })}
@@ -925,7 +947,13 @@ export default function SinglePage() {
                           onBrowse={() => browseBodyGroup(index)}
                           onOpen={() => openConfiguredPath(group.folder)} />
                       ))}
-                      <p className="px-1 text-[9px] text-muted-foreground">各组内随机抽取，组与组按 1→4 顺序拼接。</p>
+                      <div className="flex items-center justify-between gap-2 px-1">
+                        <p className="text-[9px] text-muted-foreground">各组内随机抽取，组与组按 1→10 顺序拼接，未启用组跳过。</p>
+                        <button type="button" disabled={config.body_groups.length >= 10}
+                          onClick={() => setConfig({ body_groups: [...config.body_groups, { enabled: false, folder: '', clip_count: 1, clip_duration: 3 }] })}
+                          className="h-6 shrink-0 rounded border border-border/[0.10] px-2 text-[10px] text-accent hover:border-accent/50 disabled:cursor-not-allowed disabled:opacity-40"
+                          aria-label="添加Body分组">＋添加分组 {config.body_groups.length}/10</button>
+                      </div>
                     </div>
                   )}
                 </div>

@@ -16,6 +16,52 @@ function load(source) {
   return mod.exports
 }
 
+test('framing preview sends only source paths to the current backend and preserves cancellation', async () => {
+  const previousWindow = global.window
+  const previousFetch = global.fetch
+  try {
+    global.window = { electronAPI: { getBackendPort: async () => 54321 } }
+    let call
+    global.fetch = async (...args) => { call = args; return { ok: true, json: async () => ({ image_url: 'data:image/jpeg;base64,test' }) } }
+    const { api } = load('src/renderer/api/client.ts')
+    const controller = new AbortController()
+    await api.framingPreview(['C:\\素材\\Hook', 'D:\\Body'], controller.signal)
+    assert.equal(call[0], 'http://127.0.0.1:54321/api/framing/preview')
+    assert.equal(call[1].method, 'POST')
+    assert.deepEqual(JSON.parse(call[1].body), { paths: ['C:\\素材\\Hook', 'D:\\Body'] })
+    assert.equal(call[1].signal, controller.signal)
+    controller.abort()
+    assert.equal(call[1].signal.aborted, true)
+    global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ detail: '另一个预览正在取帧' }) })
+    await assert.rejects(api.framingPreview(['source']), /另一个预览正在取帧/)
+  } finally { global.window = previousWindow; global.fetch = previousFetch }
+})
+
+test('source zoom defaults, persistence and ten-group migration preserve existing parameters', () => {
+  let saved = null
+  global.localStorage = { getItem: () => saved, setItem: (key, value) => { if (key === 'vm-config') saved = value } }
+  let { useStore } = load('src/renderer/store.ts')
+  assert.equal(useStore.getState().config.hook_zoom_percent, 100)
+  assert.equal(useStore.getState().config.body_zoom_percent, 100)
+  assert.equal(useStore.getState().config.body_groups.length, 4)
+  const groups = Array.from({ length: 10 }, (_, i) => ({ enabled: true, folder: `group-${i}`, clip_count: 1, clip_duration: 2 }))
+  useStore.getState().setConfig({ hook_zoom_percent: 150, body_zoom_percent: 200, body_groups: groups, bitrate: '9000k' })
+  ;({ useStore } = load('src/renderer/store.ts'))
+  const config = useStore.getState().config
+  assert.equal(config.hook_zoom_percent, 150)
+  assert.equal(config.body_zoom_percent, 200)
+  assert.equal(config.body_groups.length, 10)
+  assert.equal(config.body_groups[9].folder, 'group-9')
+  assert.equal(config.bitrate, '9000k')
+  const { normalizeConfigForRequest } = load('src/renderer/api/client.ts')
+  const request = normalizeConfigForRequest({ ...config, body_mode: 'grouped' })
+  assert.equal(request.total_clips, 11)
+  assert.equal(request.body_groups[9].folder, 'group-9')
+  assert.equal(request.hook_zoom_percent, 150)
+  assert.throws(() => normalizeConfigForRequest({ ...config, body_zoom_percent: 99 }), /100–300/)
+  assert.throws(() => normalizeConfigForRequest({ ...config, body_groups: [...groups, groups[0]] }), /10/)
+})
+
 test('directory browser shows files, folders and empty directories without selecting a file', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'videomatrix-browser-'))
   try {

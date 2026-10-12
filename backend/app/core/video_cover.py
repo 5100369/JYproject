@@ -13,6 +13,7 @@ from typing import Callable, Optional
 from .ffmpeg import FFMPEG, FFPROBE, run_process
 from .video_variant import VideoVariantProcessor
 from .hardware import session_for
+from .source_framing import source_crop_filter
 
 
 def prepare_cover_frame(clips, config, seed, directory, is_cancelled=None, on_process=None):
@@ -28,7 +29,7 @@ def prepare_cover_frame(clips, config, seed, directory, is_cancelled=None, on_pr
     sample_time = rng.random() * sum(float(clip['duration']) for clip in clips)
     remaining = sample_time
     selected = clips[-1]
-    for clip in clips:
+    for selected_index, clip in enumerate(clips):
         selected = clip
         if remaining < clip['duration']:
             break
@@ -44,7 +45,7 @@ def prepare_cover_frame(clips, config, seed, directory, is_cancelled=None, on_pr
     command = [
         FFMPEG, '-nostdin', '-v', 'error', '-y', '-ss', f'{source_time:.9f}',
         '-threads', '2', '-i', selected['file'], '-an',
-        '-vf', f'scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,'
+        '-vf', source_crop_filter(config, selected_index == 0) + f'scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,'
         f'crop={scaled_w}:{scaled_h},crop={width}:{height}:{crop_x:.3f}:{crop_y:.3f},setsar=1',
         '-frames:v', '1', '-threads', '1', '-compression_level', '1', '-update', '1', path,
     ]

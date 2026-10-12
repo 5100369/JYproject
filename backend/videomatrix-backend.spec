@@ -65,6 +65,8 @@ hiddenimports = [
     'app.api.routes',
     'app.core.ffmpeg',
     'app.core.video_matrix',
+    'app.core.source_framing',
+    'app.core.framing_preview',
     'app.core.output_settings',
     'app.core.video_variant',
     'app.core.dedup_plan',

@@ -52,6 +52,11 @@ class TaskService:
 
     def _normalize_config(self, config: dict) -> dict:
         normalized = config.copy()
+        from ..core.source_framing import source_zoom
+        source_zoom(normalized, True)
+        source_zoom(normalized, False)
+        if len(normalized.get('body_groups') or []) > 10:
+            raise ValueError('Body 分组最多 10 组')
         validate_output_settings(normalized)
         if (normalized.get('random_resolution_enabled') or normalized.get('random_bitrate_enabled')) and normalized.get('_output_seed') is None:
             normalized['_output_seed'] = random.SystemRandom().randrange(0, 2**63)

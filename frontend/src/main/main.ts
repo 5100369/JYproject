@@ -18,6 +18,7 @@ const PREPARE_ARG = '--videomatrix-prepare='
 const PREPARE_FIELDS = new Set([
   'hook_full_duration',
   'task_name', 'hook_dir', 'body_dirs', 'body_mode', 'body_groups', 'bgm_dir', 'voice_dir', 'srt_dir',
+  'hook_zoom_percent', 'body_zoom_percent',
   'watermark_path', 'base_out_dir', 't_hook', 't_body', 'total_clips',
   'target_count', 'hook_r', 'body_r', 'bgm_r', 'resolution', 'fps', 'bitrate',
   'random_resolution_enabled', 'random_resolution_min', 'random_resolution_max',

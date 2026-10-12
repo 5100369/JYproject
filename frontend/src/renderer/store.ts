@@ -43,6 +43,8 @@ const defaultConfig: VideoConfig = {
   body_dirs: [],
   body_mode: 'normal',
   body_groups: Array.from({ length: 4 }, (_, index) => ({ enabled: index === 0, folder: '', clip_count: 1, clip_duration: 3 })),
+  hook_zoom_percent: 100,
+  body_zoom_percent: 100,
   bgm_dir: '',
   bgm_tracks: { full: defaultBgmTrack(), hook: defaultBgmTrack(false), body: defaultBgmTrack(false) },
   finished_hook: false,
@@ -113,8 +115,10 @@ function loadSavedConfig(): VideoConfig {
       duration_mode: migration.durationMode,
       finished_hook: saved.finished_hook ?? (!saved.apply_bgm_to_hook && !saved.apply_voice_to_hook && !saved.apply_srt_to_hook && !saved.apply_watermark_to_hook),
       body_mode: saved.body_mode === 'grouped' ? 'grouped' : 'normal',
-      body_groups: Array.from({ length: 4 }, (_, index) => ({
-        ...defaultConfig.body_groups[index],
+      hook_zoom_percent: normalizeSourceZoom(saved.hook_zoom_percent),
+      body_zoom_percent: normalizeSourceZoom(saved.body_zoom_percent),
+      body_groups: Array.from({ length: Math.max(4, Math.min(10, Array.isArray(saved.body_groups) ? saved.body_groups.length : 4)) }, (_, index) => ({
+        enabled: index === 0, folder: '', clip_count: 1, clip_duration: 3,
         ...(Array.isArray(saved.body_groups) ? saved.body_groups[index] : {}),
       })),
       enable_random_cover: Boolean(saved.enable_random_cover),
@@ -151,6 +155,11 @@ function normalizeVariantBlendOpacity(value: unknown): number {
   if (value == null || value === '') return 0.03
   const parsed = Number(value)
   return Number.isFinite(parsed) ? Math.max(0.01, Math.min(0.15, parsed)) : 0.03
+}
+
+function normalizeSourceZoom(value: unknown): number {
+  const percent = Number(value)
+  return Number.isFinite(percent) && percent >= 100 && percent <= 300 ? percent : 100
 }
 
 let toastId = 0
