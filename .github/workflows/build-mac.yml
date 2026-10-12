@@ -83,8 +83,12 @@ jobs:
       - name: Verify macOS media tools
         run: |
           chmod +x backend/ffmpeg/ffmpeg backend/ffmpeg/ffprobe
-          backend/ffmpeg/ffmpeg -version | head -1 | grep 'ffmpeg version 9.0.2 '
-          backend/ffmpeg/ffprobe -version | head -1 | grep 'ffprobe version 9.0.2 '
+          for tool in ffmpeg ffprobe; do
+            version=$("backend/ffmpeg/$tool" -version | sed -n '1p')
+            echo "$version"
+            # Evermeet appends its publisher suffix (for example -tessus).
+            echo "$version" | grep -E "^$tool version 9\\.0\\.2([- ]|$)"
+          done
 
       - name: Test backend regressions
         working-directory: backend
