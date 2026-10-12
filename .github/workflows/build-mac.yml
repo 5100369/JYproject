@@ -41,26 +41,50 @@ jobs:
           python -m pip install pyinstaller pytest
 
       # ── Bundle macOS FFmpeg / FFprobe ───────────────────────────────────
-      - name: Download FFmpeg static build
+      - name: Restore verified macOS media tools
+        id: media-tools
+        uses: actions/cache@v4
+        with:
+          path: backend/ffmpeg
+          key: macos-evermeet-9.0.2-from-v2.7.0-v1
+
+      # Reuse the same Evermeet 9.0.2 tools from our verified release. This
+      # avoids the upstream mirror's persistent 429 responses on CI runners.
+      # Only the two media tools are extracted; no old application code is used.
+      - name: Prepare verified FFmpeg static build
+        if: steps.media-tools.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p backend/ffmpeg
-          for tool in ffmpeg ffprobe; do
-            url="https://evermeet.cx/ffmpeg/getrelease/zip"
-            if [ "$tool" = ffprobe ]; then
-              url="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
-              # The download mirror rate-limits consecutive large requests.
-              sleep 60
-            fi
-            for attempt in 1 2 3; do
-              if curl --fail --location --retry 5 --retry-delay 60 --retry-max-time 600 --retry-all-errors --connect-timeout 20 --max-time 180 "$url" -o "$tool.zip" && unzip -tq "$tool.zip"; then
-                break
-              fi
-              if [ "$attempt" = 3 ]; then echo "Invalid $tool archive after retries"; exit 1; fi
-              sleep 60
-            done
-            unzip -o "$tool.zip" -d backend/ffmpeg
+          tools_dir="$RUNNER_TEMP/videomatrix-media-tools"
+          mkdir -p "$tools_dir"
+          for attempt in 1 2 3; do
+            if gh release download v2.7.0 --repo "$GITHUB_REPOSITORY" \
+              --pattern VideoMatrix.Setup.2.7.0-mac.dmg --dir "$tools_dir" --clobber; then break; fi
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 10
           done
+          dmg="$tools_dir/VideoMatrix.Setup.2.7.0-mac.dmg"
+          echo "be276ec7c6368a1b92cad5fea3fb1924b8f3849044030df1b2ecdde303d2b3aa  $dmg" | shasum -a 256 -c -
+          mount_dir="$tools_dir/mounted"
+          mkdir -p "$mount_dir"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          python - "$mount_dir/VideoMatrix.app/Contents/Resources/backend/videomatrix-backend" <<'PY'
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          import sys
+          archive = CArchiveReader(sys.argv[1])
+          for tool in ("ffmpeg", "ffprobe"):
+              Path("backend/ffmpeg", tool).write_bytes(archive.extract(tool))
+          PY
+
+      - name: Verify macOS media tools
+        run: |
           chmod +x backend/ffmpeg/ffmpeg backend/ffmpeg/ffprobe
+          backend/ffmpeg/ffmpeg -version | head -1 | grep 'ffmpeg version 9.0.2 '
+          backend/ffmpeg/ffprobe -version | head -1 | grep 'ffprobe version 9.0.2 '
 
       - name: Test backend regressions
         working-directory: backend
