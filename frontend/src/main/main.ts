@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, clipboard, net } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import os from 'os'
@@ -9,10 +9,95 @@ import { listDirectory, createDirectory } from './directoryBrowser'
 import { createThumbnailReader } from './nativeThumbnails'
 import { createDirectoryActions } from './directoryActions'
 import type { DirectoryAction } from '../shared/directory'
+import { UpdateManager } from './updateManager'
+import { createUpdateDemo } from './updateDemo'
+import { DEFAULT_UPDATE_PREFERENCES } from './updateProtocol'
+import { UPDATE_PUBLIC_KEY } from '../shared/updatePublicKey'
+import type { UpdateActivity, UpdatePreferences, UpdateTestScenario } from '../shared/updates'
 
 let mainWindow: BrowserWindow | null = null
 let backendProcess: ChildProcess | null = null
 let isQuitting = false
+let updateManager: UpdateManager | null = null
+let updateDemo: UpdateManager | null = null
+const activeUpdater = () => updateDemo ?? updateManager
+
+async function updateActivity(): Promise<UpdateActivity> {
+  if (!backendVerified || isQuitting) throw new Error('后端尚未就绪')
+  const response = await fetch(`http://127.0.0.1:${backendPort}/api/tasks/activity`, { signal: AbortSignal.timeout(2500) })
+  if (!response.ok) throw new Error('无法确认任务状态')
+  return response.json()
+}
+
+function setupUpdates() {
+  updateManager = new UpdateManager({
+    version: app.getVersion(), platform: `${process.platform}-${process.arch}`, development: !app.isPackaged,
+    publicKey: UPDATE_PUBLIC_KEY, cacheDir: path.join(app.getPath('userData'), 'update-cache'),
+    settingsFile: path.join(app.getPath('userData'), 'update-preferences.json'),
+    fetcher: (url, init) => net.fetch(url, init), activity: updateActivity,
+    changed: state => { if (!updateDemo && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updates:changed', state) },
+    apply: async (installer, activity) => {
+      const mac = process.platform === 'darwin'
+      const detail = [
+        activity.resumable ? `有 ${activity.resumable} 个未完成任务，重启后不能继续旧任务；已有成片保留。` : '已有成片、素材、配置和使用记录保留。',
+        mac ? '将打开 DMG，请先退出 VideoMatrix，再将新版拖入应用程序。Mac 包目前未开发者签名及公证。' : '将启动 Windows 安装向导并退出当前软件，请按向导完成安装。',
+      ].join('\n\n')
+      const answer = await dialog.showMessageBox(mainWindow!, { type: 'question', title: '确认更新 VideoMatrix', message: '是否现在安装新版？', detail,
+        buttons: ['稍后', mac ? '打开 DMG' : '开始安装'], defaultId: 0, cancelId: 0 })
+      if (answer.response !== 1) return false
+      if ((await updateActivity()).busy) throw new Error('任务状态已改变，请等待生产结束后再安装')
+      // The confirmation can stay open for minutes; revalidate after it closes.
+      if (await updateManager!.installerPath() !== installer) throw new Error('安装包已改变，请重新下载')
+      if ((await updateActivity()).busy) throw new Error('生产任务优先，请等待结束后再安装')
+      if (mac) {
+        const error = await shell.openPath(installer)
+        if (error) throw new Error(error)
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(installer, [], { detached: true, stdio: 'ignore', windowsHide: false })
+          child.once('error', reject)
+          child.once('spawn', () => { child.unref(); resolve() })
+        })
+        await shutdownApp()
+      }
+      return true
+    },
+  })
+  updateManager.start()
+  logDev('在线更新器已初始化；开发版不自动检查或执行安装。')
+}
+ipcMain.handle('updates:state', () => activeUpdater()?.snapshot())
+ipcMain.handle('updates:check', () => activeUpdater()?.check())
+ipcMain.handle('updates:download', () => activeUpdater()?.download())
+ipcMain.handle('updates:pause', () => activeUpdater()?.pause())
+ipcMain.handle('updates:install', () => activeUpdater()?.install())
+ipcMain.handle('updates:presets', () => structuredClone(DEFAULT_UPDATE_PREFERENCES.sources))
+ipcMain.handle('updates:probe', (event, preferences: UpdatePreferences) => {
+  assertDirectorySender(event)
+  if (!activeUpdater()) throw new Error('更新器尚未就绪')
+  return activeUpdater()!.probeSources(preferences)
+})
+ipcMain.handle('updates:demo', (event, scenario: UpdateTestScenario | null) => {
+  assertDirectorySender(event)
+  if (app.isPackaged) throw new Error('更新演练仅限开发版')
+  if (!activeUpdater()?.canSwitch()) throw new Error('请先暂停更新操作，再切换演练')
+  updateDemo?.dispose(); updateDemo = null
+  if (scenario !== null) updateDemo = createUpdateDemo({ development: !app.isPackaged, version: app.getVersion(), platform: `${process.platform}-${process.arch}`,
+    directory: path.join(app.getPath('userData'), 'update-test'), scenario, activity: updateActivity,
+    changed: state => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updates:changed', state) },
+  })
+  const state = activeUpdater()!.snapshot()
+  mainWindow?.webContents.send('updates:changed', state)
+  return state
+})
+ipcMain.handle('updates:preferences', (_event, preferences: UpdatePreferences) => {
+  if (!updateManager) throw new Error('更新器尚未就绪')
+  return activeUpdater()!.savePreferences(preferences)
+})
+ipcMain.handle('updates:reveal', async () => {
+  if (!updateManager) throw new Error('更新器尚未就绪')
+  shell.showItemInFolder(await activeUpdater()!.installerPath())
+})
 
 const PREPARE_ARG = '--videomatrix-prepare='
 const PREPARE_FIELDS = new Set([
@@ -231,6 +316,8 @@ async function stopBackendTasks(timeoutMs = 2500) {
 async function shutdownApp() {
   if (isQuitting) return
   isQuitting = true
+  updateManager?.dispose()
+  updateDemo?.dispose()
   await stopBackendTasks()
   await stopBackend()
   mainWindow?.destroy()
@@ -499,7 +586,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     try {
       await startBackend()
-      if (!isQuitting) createWindow()
+      if (!isQuitting) { createWindow(); setupUpdates() }
     } catch (error) {
       dialog.showErrorBox('VideoMatrix 启动失败', String(error))
       await shutdownApp()

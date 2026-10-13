@@ -481,6 +481,20 @@ class TaskService:
                 self._refresh_task_controls_locked(task_id)
             return list(self.tasks.values())
 
+    def get_activity(self) -> dict:
+        """Small updater gate: no logs, media probing, or task configuration copies."""
+        with self.cores_lock:
+            busy = (self._benchmark_task_id is not None
+                    or any(task.status in ('pending', 'running') for task in self.tasks.values())
+                    or any(run.active for run in self._production_runs.values())
+                    or any(self.active_cores.values()) or any(self.variant_processes.values()))
+            resumable = sum(
+                1 for task_id, run in self._production_runs.items()
+                if task_id in self.tasks and self.tasks[task_id].status in ('stopped', 'partial', 'failed')
+                and (run.jobs is None or len(run.outputs) < len(run.jobs))
+            )
+            return {'busy': bool(busy), 'resumable': resumable}
+
     def get_logs(self, task_id: str) -> List[str]:
         with self._log_lock:
             return list(self.log_buffers.get(task_id, []))

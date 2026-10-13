@@ -1,0 +1,33 @@
+name: Publish signed desktop update feed
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release with both verified installers
+        required: true
+permissions:
+  contents: write
+jobs:
+  signed-feed:
+    runs-on: ubuntu-latest
+    env:
+      VIDEOMATRIX_UPDATE_PRIVATE_KEY: ${{ secrets.VIDEOMATRIX_UPDATE_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify both installer assets and publish signed update.json
+        if: env.VIDEOMATRIX_UPDATE_PRIVATE_KEY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VIDEOMATRIX_UPDATE_PRIVATE_KEY: ${{ secrets.VIDEOMATRIX_UPDATE_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.release_tag }}
+        run: node scripts/update-release.cjs publish "$RELEASE_TAG"
+      - name: Explain local signing mode
+        if: env.VIDEOMATRIX_UPDATE_PRIVATE_KEY == ''
+        run: echo 'No signing secret configured. The maintainer must sign and upload update.json locally before announcing online updates.'

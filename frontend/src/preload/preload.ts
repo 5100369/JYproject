@@ -1,7 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { DirectoryListing, DirectoryAction, TrashResult } from '../shared/directory'
+import type { UpdateState, UpdatePreferences, UpdateSource, UpdateSourceCheck, UpdateTestScenario } from '../shared/updates'
 
 export interface ElectronAPI {
+  getUpdatePresets: () => Promise<UpdateSource[]>
+  probeUpdateSources: (preferences: UpdatePreferences) => Promise<UpdateSourceCheck[]>
+  setUpdateDemo: (scenario: UpdateTestScenario | null) => Promise<UpdateState>
+  getUpdateState: () => Promise<UpdateState>
+  checkUpdates: () => Promise<void>
+  downloadUpdate: () => Promise<void>
+  pauseUpdate: () => Promise<void>
+  installUpdate: () => Promise<void>
+  revealUpdate: () => Promise<void>
+  saveUpdatePreferences: (preferences: UpdatePreferences) => Promise<UpdateState>
+  onUpdateState: (listener: (state: UpdateState) => void) => () => void
   directoryActionMenu: (parent: string, items: string[]) => Promise<DirectoryAction | null>
   renameEntry: (parent: string, item: string, name: string) => Promise<string>
   trashEntries: (parent: string, items: string[]) => Promise<TrashResult>
@@ -19,6 +31,21 @@ export interface ElectronAPI {
 }
 
 const api: ElectronAPI = {
+  getUpdatePresets: () => ipcRenderer.invoke('updates:presets'),
+  probeUpdateSources: preferences => ipcRenderer.invoke('updates:probe', preferences),
+  setUpdateDemo: scenario => ipcRenderer.invoke('updates:demo', scenario),
+  getUpdateState: () => ipcRenderer.invoke('updates:state'),
+  checkUpdates: () => ipcRenderer.invoke('updates:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updates:download'),
+  pauseUpdate: () => ipcRenderer.invoke('updates:pause'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
+  revealUpdate: () => ipcRenderer.invoke('updates:reveal'),
+  saveUpdatePreferences: preferences => ipcRenderer.invoke('updates:preferences', preferences),
+  onUpdateState: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, state: UpdateState) => listener(state)
+    ipcRenderer.on('updates:changed', handler)
+    return () => ipcRenderer.removeListener('updates:changed', handler)
+  },
   directoryActionMenu: (parent, items) => ipcRenderer.invoke('directory:menu', parent, items),
   renameEntry: (parent, item, name) => ipcRenderer.invoke('directory:rename', parent, item, name),
   trashEntries: (parent, items) => ipcRenderer.invoke('directory:trash', parent, items),

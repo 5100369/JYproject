@@ -8,6 +8,7 @@ import { AssetCard } from './AssetCard'
 import { SourceFramingSettings } from './SourceFramingSettings'
 import { FeatureHelp } from './FeatureHelp'
 import { BgmPanel } from './BgmPanel'
+import UpdateControl from './UpdateControl'
 import { useDirectoryPicker } from './DirectoryPicker'
 
 const RESOLUTION_PRESETS = [
@@ -914,6 +915,7 @@ export default function SinglePage() {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <UpdateControl />
             <button
               type="button"
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}

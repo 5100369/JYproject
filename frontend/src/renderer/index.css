@@ -120,6 +120,29 @@
 .feature-help-dialog::backdrop { background: rgb(0 0 0 / .25); }
 .tutorial-dialog { width: min(600px, calc(100vw - 24px)); }
 .tutorial-dialog::backdrop { background: rgb(0 0 0 / .45); }
+.update-trigger { white-space: nowrap; color: rgb(var(--color-accent)); }
+.update-dialog { width: min(560px, calc(100vw - 32px)); font-size: 13px; line-height: 1.6; }
+.update-dialog::backdrop { background: rgb(0 0 0 / .45); }
+.update-summary { padding: 12px; margin-bottom: 12px; border: 1px solid rgb(var(--color-border) / .18); border-radius: 6px; }
+.update-message { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.update-progress { display: block; width: 100%; height: 8px; margin: 12px 0 8px; accent-color: rgb(var(--color-accent)); }
+.update-progress::-webkit-progress-bar { background: rgb(var(--color-border) / .16); border-radius: 4px; }
+.update-progress::-webkit-progress-value { background: rgb(var(--color-accent)); border-radius: 4px; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.update-actions button { min-height: 30px; padding: 4px 10px; border: 1px solid rgb(var(--color-border) / .24); border-radius: 4px; }
+.update-actions .update-primary { background: rgb(var(--color-accent)); color: rgb(var(--color-background)); border-color: transparent; }
+.update-dialog button:not(:disabled), .update-dialog summary { cursor: pointer; }
+.update-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.update-dialog button:focus-visible, .update-dialog input:focus-visible, .update-dialog select:focus-visible, .update-dialog summary:focus-visible { outline: 2px solid rgb(var(--color-accent)); outline-offset: 2px; }
+.update-select { padding: 5px; border: 1px solid rgb(var(--color-border) / .25); border-radius: 4px; background: rgb(var(--color-background)); color: rgb(var(--color-foreground)); max-width: 100%; }
+.update-hint { font-size: 12px; color: rgb(var(--color-muted-foreground)); margin: 10px 0; }
+.update-notes, .update-sources { margin-top: 14px; border-top: 1px solid rgb(var(--color-border) / .18); padding-top: 12px; }
+.update-notes > div { max-height: 180px; overflow-y: auto; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.update-options { display: grid; gap: 8px; margin: 12px 0; }
+.update-options label, .update-source > label:first-child { display: flex; align-items: center; gap: 8px; }
+.update-dialog input[type=checkbox] { accent-color: rgb(var(--color-accent)); }
+.update-source { border: 1px solid rgb(var(--color-border) / .18); border-radius: 5px; padding: 10px; margin: 8px 0; }
+.update-source input[type=url] { display: block; width: 100%; border: 1px solid rgb(var(--color-border) / .25); border-radius: 4px; padding: 7px; margin-top: 4px; background: rgb(var(--color-background)); color: rgb(var(--color-foreground)); font-size: 12px; }
 .help-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .help-heading h2, .tutorial-content h3 { font-weight: 600; }
 .help-heading button { font-size: 12px; padding: 3px 8px; border: 1px solid rgb(var(--color-border) / .2); border-radius: 4px; }

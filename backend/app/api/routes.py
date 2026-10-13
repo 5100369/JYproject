@@ -53,6 +53,11 @@ def list_tasks():
     return task_service.get_all_tasks()
 
 
+@router.get('/tasks/activity')
+def task_activity():
+    return task_service.get_activity()
+
+
 @router.get("/tasks/{task_id}", response_model=TaskStatus)
 def get_task(task_id: str):
     task = task_service.get_task(task_id)

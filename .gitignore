@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .build-venv/
+.release-tools/
 venv/
 
 # Build outputs

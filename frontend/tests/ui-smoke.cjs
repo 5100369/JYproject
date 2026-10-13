@@ -176,7 +176,7 @@ async function main() {
       await page.getByRole('button', { name: 'Hook画面设置', exact: true }).click()
       const pendingSettings = page.getByRole('dialog', { name: 'Hook 素材放大裁切', exact: true })
       await pendingSettings.getByRole('button', { name: 'Hook换一帧', exact: true }).click()
-      await page.waitForFunction(() => document.querySelector('[role="status"]')?.textContent.includes('正在读取素材'))
+      await pendingSettings.getByRole('status').filter({ hasText: '正在读取素材' }).waitFor()
       await page.keyboard.press('Escape')
       if (pendingPreviewRoute) await pendingPreviewRoute.fulfill({ json: { image_url: previewImage, file_path: 'late.mp4', time_seconds: 0 } }).catch(() => {})
       pendingPreviewRoute = null
