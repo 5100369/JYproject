@@ -1,12 +1,12 @@
 {
   "name": "videomatrix-frontend",
-  "version": "2.8.0",
+  "version": "1.0.0",
   "private": true,
   "description": "VideoMatrix desktop video mixing tool",
-  "author": "w2968066",
+  "author": "JYproject",
   "repository": {
     "type": "git",
-    "url": "https://github.com/w2968066/VideoMatrix--.git"
+    "url": "https://github.com/5100369/JYproject.git"
   },
   "main": "dist/main/main.js",
   "scripts": {
@@ -75,5 +75,6 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
-  }
+  },
+  "homepage": "https://github.com/5100369/JYproject"
 }

@@ -28,6 +28,9 @@ ffmpeg_error_log.txt
 stdout.txt
 stderr.txt
 
+# Logs
+*.log
+
 # OS / IDE
 .DS_Store
 Thumbs.db

@@ -182,3 +182,8 @@
 .directory-details td:not(:first-child) { color: rgb(var(--color-muted-foreground)); }
 .directory-details tbody tr:has(button):hover { background: rgb(var(--color-accent) / .06); }
 .directory-favorites { max-height: 88px; overflow-y: auto; }
+
+
+/* 标签栏横向滚动但不显示滚动条 */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }

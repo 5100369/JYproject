@@ -41,6 +41,18 @@ class VideoConfig(BaseModel):
     t_body: float = Field(default=3.0, ge=0.5, description="后段片段时长(秒)")
     body_full_duration: bool = Field(default=False, description="普通 Body 使用完整原素材")
     total_clips: int = Field(default=5, ge=2, description="每视频总片段数")
+
+    clip_duration_random_enabled: bool = Field(
+        default=False,
+        description="每个片段时长在最短/最长之间随机截取，未启用时按 t_hook / t_body 固定时长",
+    )
+    clip_duration_min: float = Field(default=2.0, ge=0.5, le=120, description="单片段最短时长(秒)")
+    clip_duration_max: float = Field(default=4.0, ge=0.5, le=120, description="单片段最长时长(秒)")
+    clip_duration_step: float = Field(default=0.1, ge=0, le=2, description="随机时长精度(秒)，0 表示保留到毫秒")
+    clip_duration_scope: Literal["body", "all"] = Field(
+        default="body",
+        description="随机时长作用范围：body 仅后段，all 含首段",
+    )
     target_count: int = Field(default=10, ge=1, description="目标生成数量")
     
     hook_r: float = Field(default=0.5, ge=0.0, le=1.0, description="首段重叠率")
@@ -89,6 +101,26 @@ class VideoConfig(BaseModel):
     variant_seed: Optional[int] = Field(default=None, ge=0, description="任务级随机种子")
     enable_random_cover: bool = Field(default=False, description="随机替换成片首帧")
     random_cover_mode: Literal["replace", "insert"] = Field(default="replace", description="随机封面首帧处理方式")
+
+    output_name_template: str = Field(
+        default="{name}_{i:03d}",
+        description="输出文件名模板，支持 {name}/{i:03d}/{date}/{time}/{datetime}/{rand}/{resolution}",
+    )
+    export_jianying_draft: bool = Field(default=True, description="出片同时导出对应剪映草稿")
+    jianying_draft_dir: str = Field(default="", description="剪映草稿箱目录；留空自动探测")
+
+    smart_select_enabled: bool = Field(
+        default=False,
+        description="按素材分析结果选片（按镜头边界切、按高分优先），未分析过的素材自动回退等间隔切片",
+    )
+    smart_select_min_score: float = Field(
+        default=0, ge=0, le=100,
+        description="智能选片时低于此分数的镜头直接跳过，0 表示不过滤",
+    )
+    smart_select_hook_top: int = Field(
+        default=12, ge=1, le=200,
+        description="智能选片时 Hook 只从分数最高的前 N 个镜头里抽，保证开头质量",
+    )
 
     @model_validator(mode='before')
     @classmethod
@@ -180,3 +212,56 @@ class CreateTaskResponse(BaseModel):
 
 class StopTaskRequest(BaseModel):
     task_id: str
+
+
+class ScheduleCreate(BaseModel):
+    name: str = Field(default="定时任务", description="定时任务名称")
+    config: VideoConfig = Field(description="到点执行时使用的完整混剪配置快照")
+    trigger_type: Literal["once", "daily", "weekly", "interval"] = Field(default="once")
+    time_of_day: str = Field(default="09:00", description="每天/每周的执行时刻 HH:MM")
+    weekdays: List[int] = Field(default_factory=list, description="每周执行日，1=周一 … 7=周日")
+    run_at: str = Field(default="", description="单次执行时间 YYYY-MM-DDTHH:MM")
+    interval_minutes: int = Field(default=60, ge=1, le=10080, description="间隔执行的分钟数")
+    grace_minutes: int = Field(default=30, ge=0, le=1440, description="错过执行点后的补跑窗口")
+
+
+class ScheduleUpdate(BaseModel):
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    time_of_day: Optional[str] = None
+    weekdays: Optional[List[int]] = None
+    run_at: Optional[str] = None
+    interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+    grace_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
+
+
+class LlmSettingsPayload(BaseModel):
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    clear_key: bool = False
+
+
+class LlmGenerateRequest(BaseModel):
+    brief: str = Field(description="产品信息 / 卖点")
+    count: int = Field(default=3, ge=1, le=10)
+    style: str = Field(default="", description="风格要求")
+    duration: float = Field(default=30, ge=5, le=180, description="单条时长(秒)")
+
+
+class LlmSrtRequest(BaseModel):
+    text: str = Field(min_length=1)
+    directory: str = Field(description="字幕目录")
+    filename: str = ""
+    chars_per_second: float = Field(default=4.5, ge=1, le=12)
+
+
+class AnalyzeRequest(BaseModel):
+    directory: str = Field(description="要分析的素材目录")
+    recursive: bool = True
+    use_vlm: bool = Field(default=False, description="是否调用视觉模型做语义理解")
+    limit: int = Field(default=0, ge=0, le=500, description="最多分析多少个文件，0 表示不限")
+    max_shots: int = Field(default=40, ge=5, le=200, description="每个视频最多保留多少镜头")
+    sample_fps: float = Field(default=2.0, ge=0.5, le=10)
+    scene_threshold: float = Field(default=10.0, ge=1, le=100)

@@ -29,4 +29,4 @@
 - 内置后端、FFmpeg/FFprobe 和思源黑体，无需单独安装 Python。
 - macOS 未进行 Apple 开发者签名及公证，可能遇到系统安全限制；完整桌面使用及旧系统兼容仍需 Mac 实机验证。
 
-详细说明：[三轨配乐](https://github.com/w2968066/VideoMatrix--/blob/v2.5.0/docs/bgm-three-tracks.md)、[目录浏览与文件管理](https://github.com/w2968066/VideoMatrix--/blob/v2.5.0/docs/directory-browser.md)。
+详细说明：[三轨配乐](https://github.com/5100369/JYproject/blob/v2.5.0/docs/bgm-three-tracks.md)、[目录浏览与文件管理](https://github.com/5100369/JYproject/blob/v2.5.0/docs/directory-browser.md)。

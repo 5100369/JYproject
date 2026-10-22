@@ -10,7 +10,7 @@ on:
       release_tag:
         description: "Release tag to upload the installer to"
         required: true
-        default: "v2.8.0"
+        default: "v1.0.0"
   push:
     tags:
       - "v*"
@@ -25,6 +25,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # 版本号只有 package.json 一个来源；后端 /health 通过该环境变量读取
+      - name: Resolve app version
+        shell: pwsh
+        run: |
+          $v = (Get-Content frontend/package.json -Raw | ConvertFrom-Json).version
+          "VIDEOMATRIX_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # ── Python toolchain ─────────────────────────────────────────────────
       - name: Set up Python

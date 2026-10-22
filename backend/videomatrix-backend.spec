@@ -73,7 +73,21 @@ hiddenimports = [
     'app.core.dedup_blend',
     'app.core.timeline',
     'app.core.video_cover',
+    'app.core.audio_timeline',
+    'app.core.jianying_draft',
+    'app.core.naming',
+    # 素材画面分析（延迟导入较多，显式列出更稳）
+    'app.core.analyzer',
+    'app.core.analyzer.ffmpeg_scan',
+    'app.core.analyzer.frames',
+    'app.core.analyzer.scoring',
+    'app.core.analyzer.store',
+    'app.core.analyzer.vision',
+    'app.core.analyzer.pipeline',
     'app.services.task_service',
+    'app.services.analysis_service',
+    'app.services.llm_service',
+    'app.services.scheduler_service',
     'app.models.schemas',
 ]
 

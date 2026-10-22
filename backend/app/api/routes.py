@@ -1,14 +1,21 @@
 import os
+import re
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import asyncio
 import json
 
 from ..models.schemas import (
     CreateTaskRequest, CreateTaskResponse, StopTaskRequest,
-    TaskStatus, ScanRequest, ScanResponse, ProbeResult, VideoConfig, FramingPreviewRequest
+    TaskStatus, ScanRequest, ScanResponse, ProbeResult, VideoConfig, FramingPreviewRequest,
+    ScheduleCreate, ScheduleUpdate, LlmSettingsPayload, LlmGenerateRequest, LlmSrtRequest,
+    AnalyzeRequest,
 )
 from ..services.task_service import task_service, TaskBusyError
+from ..services.scheduler_service import scheduler_service
+from ..services import llm_service
+from ..services.analysis_service import analysis_service, AnalysisBusyError
+from ..core.analyzer import store as analysis_store
 from ..core.ffmpeg import probe_media, extract_media_info, extract_audio_duration
 
 router = APIRouter()
@@ -183,3 +190,132 @@ def preflight(config: VideoConfig):
 def clear_history():
     task_service.clear_history()
     return {"message": "使用记录已清除"}
+
+
+# ── 定时混剪 ──────────────────────────────────────────────────────────────
+@router.get("/schedules")
+def list_schedules():
+    return scheduler_service.list()
+
+
+@router.post("/schedules")
+def create_schedule(req: ScheduleCreate):
+    try:
+        return scheduler_service.create(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/schedules/{schedule_id}")
+def update_schedule(schedule_id: str, req: ScheduleUpdate):
+    try:
+        item = scheduler_service.update(schedule_id, req.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not item:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return item
+
+
+@router.delete("/schedules/{schedule_id}")
+def delete_schedule(schedule_id: str):
+    if not scheduler_service.delete(schedule_id):
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+    return {"message": "已删除"}
+
+
+@router.post("/schedules/{schedule_id}/run-now", response_model=CreateTaskResponse)
+def run_schedule_now(schedule_id: str):
+    try:
+        result = scheduler_service.run_now(schedule_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="定时任务不存在") from exc
+    except TaskBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return CreateTaskResponse(task_id=result["task_id"], message=result["message"])
+
+
+# ── LLM 文案 ──────────────────────────────────────────────────────────────
+@router.get("/llm/settings")
+def get_llm_settings():
+    return llm_service.public_settings()
+
+
+@router.post("/llm/settings")
+def save_llm_settings(req: LlmSettingsPayload):
+    llm_service.save_settings(req.model_dump())
+    return llm_service.public_settings()
+
+
+@router.post("/llm/generate")
+def generate_copy(req: LlmGenerateRequest):
+    try:
+        return llm_service.generate(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/llm/to-srt")
+def copy_to_srt(req: LlmSrtRequest):
+    try:
+        return llm_service.write_srt(req.text, req.directory, req.filename, req.chars_per_second)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── 素材画面分析 ──────────────────────────────────────────────────────────
+@router.post("/analyze")
+def start_analysis(req: AnalyzeRequest):
+    try:
+        return analysis_service.start(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AnalysisBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/analyze/latest")
+def latest_analysis():
+    return analysis_service.latest() or {}
+
+
+@router.get("/analyze/{job_id}")
+def get_analysis(job_id: str):
+    job = analysis_service.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+    return job
+
+
+@router.post("/analyze/{job_id}/stop")
+def stop_analysis(job_id: str):
+    if not analysis_service.stop(job_id):
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+    return {"message": "停止指令已发送"}
+
+
+@router.get("/analysis/thumb/{key}/{name}")
+def get_analysis_thumb(key: str, name: str):
+    if not re.fullmatch(r"[0-9a-f]{16}", key) or not re.fullmatch(r"\d{3}\.jpg", name):
+        raise HTTPException(status_code=400, detail="无效的缩略图地址")
+    path = analysis_store.analysis_root() / "thumbs" / key / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="缩略图不存在")
+    return FileResponse(str(path), media_type="image/jpeg")
+
+
+@router.post("/analysis/clear")
+def clear_analysis():
+    return {"removed": analysis_store.clear_all()}
+
+
+@router.get("/analysis/{key}")
+def get_analysis_result(key: str):
+    if not re.fullmatch(r"[0-9a-f]{16}", key):
+        raise HTTPException(status_code=400, detail="无效的分析编号")
+    data = analysis_store.load_key(key)
+    if not data:
+        raise HTTPException(status_code=404, detail="没有这个分析结果，可能已被清理")
+    return data

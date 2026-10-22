@@ -11,6 +11,7 @@ import uuid
 import re
 import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 
 from .ffmpeg import (
@@ -21,6 +22,9 @@ from .timeline import apply_timeline_totals, body_segment_specs
 from .source_framing import source_crop_filter
 from .bgm_tracks import configured_tracks, prepare_track, track_filter, TRACK_LABELS
 from .output_settings import resolve_output_config, validate_output_settings, parse_resolution
+from .naming import DEFAULT_NAME_TEMPLATE, render_name_template
+from .jianying_draft import export_draft, read_srt_cues, resolve_draft_root
+from .analyzer import store as analysis_store
 
 MEDIA_CACHE_VERSION = 2
 DURATION_EPSILON = 0.001
@@ -160,6 +164,8 @@ class VideoMatrixCore:
         self.core_lock = threading.Lock()
         self._variant_probe_lock = threading.Lock()
         self._variant_probe_cache = {}
+        # 草稿目录只提示一次，避免批量出片时刷屏
+        self._draft_hint_shown = False
 
     def _probe_variant_input(self, path: str) -> dict:
         """Only optional B inputs need an extra probe; share it across outputs."""
@@ -248,7 +254,8 @@ class VideoMatrixCore:
         s, ms = int(ms // 1000), int(ms % 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    def process_srt(self, srt_dir: str, duration_sec: float, offset_sec: float = 0.0) -> Optional[str]:
+    def process_srt(self, srt_dir: str, duration_sec: float, offset_sec: float = 0.0):
+        """烧录用临时 SRT；返回 (转义路径, 选中的源文件信息) 供剪映草稿还原字幕。"""
         frozen_files = self.config.get('_benchmark_srt_files')
         srt_files = list(frozen_files) if frozen_files is not None else self._scan_files(srt_dir, ('.srt',))
         if not srt_files:
@@ -288,7 +295,101 @@ class VideoMatrixCore:
         temp_srt_path = os.path.join(self.temp_dir_path, f"temp_{uuid.uuid4().hex[:8]}.srt")
         with open(temp_srt_path, 'w', encoding='utf-8') as f:
             f.write("\n\n".join(new_subs) + "\n\n")
-        return temp_srt_path.replace('\\', '/').replace(':', '\\:').replace("'", "'\\''")
+        info = {'path': srt_path, 'duration': duration_sec, 'offset': offset_sec}
+        return temp_srt_path.replace('\\', '/').replace(':', '\\:').replace("'", "'\\''"), info
+
+    def _smart_shots(self, path: str, need_duration: float,
+                     min_score: float) -> Optional[List[dict]]:
+        """读素材分析结果，返回能切出 need_duration 秒的镜头，按分数降序。
+
+        没分析过、结果已过期或没有达标镜头时返回 None，调用方回退等间隔切片。
+        每条结果带 avail（镜头可用长度），供「片段时长随机」时做上限约束。
+        """
+        try:
+            data = analysis_store.load(path)
+        except Exception:  # noqa: BLE001 - 分析缓存异常不能影响出片
+            return None
+        if not data:
+            return None
+
+        usable: List[dict] = []
+        for shot in data.get("shots") or []:
+            score = float(shot.get("score") or 0)
+            if score < min_score:
+                continue
+            length = float(shot.get("duration") or 0)
+            # 时长不够切一段就跳过：硬切会改变成片总时长，音画会错位
+            if length < need_duration + 0.05:
+                continue
+            usable.append({
+                "start": float(shot.get("start") or 0),
+                "score": score,
+                "tags": shot.get("tags") or [],
+                "avail": length,
+            })
+        if not usable:
+            return None
+        usable.sort(key=lambda item: item["score"], reverse=True)
+        return usable
+
+    # ── 片段时长随机 ────────────────────────────────────────────────────
+    def _random_duration_cfg(self, cfg: dict) -> Optional[dict]:
+        """解析「片段时长随机」配置。
+
+        未启用时返回 None。区间过窄（最大最小差 < 0.1 秒）也返回 None，
+        等价于固定时长，避免每条片子时长完全一致却仍走随机分支。
+        """
+        if not cfg.get('clip_duration_random_enabled'):
+            return None
+        lo = float(cfg.get('clip_duration_min') or 0)
+        hi = float(cfg.get('clip_duration_max') or 0)
+        if lo < 0.5 or hi < 0.5:
+            raise ValueError('单片段时长不能小于 0.5 秒。')
+        if hi + 1e-9 < lo:
+            raise ValueError(f'单片段最长时长（{hi:g} 秒）不能小于最短时长（{lo:g} 秒）。')
+        if hi - lo < 0.1:
+            return None
+        step = float(cfg.get('clip_duration_step') if cfg.get('clip_duration_step') is not None else 0.1)
+        return {
+            'min': lo,
+            'max': hi,
+            'step': max(0.0, step),
+            'scope': 'all' if cfg.get('clip_duration_scope') == 'all' else 'body',
+        }
+
+    @staticmethod
+    def _pick_random_duration(rand: dict, rng, avail: Optional[float] = None) -> float:
+        """在 [min, max] 内随机一个时长，并按可用长度做上限约束。"""
+        hi = rand['max'] if avail is None else min(rand['max'], max(0.0, avail))
+        lo = min(rand['min'], hi)
+        step = rand['step']
+        if hi - lo <= 1e-6:
+            value = hi
+        else:
+            value = rng.uniform(lo, hi)
+            if step > 0:
+                value = round(value / step) * step
+            value = min(max(value, lo), hi)
+        return round(value, 3)
+
+    def _apply_random_durations(self, clips: List[dict], rand: Optional[dict],
+                                rng, scope: str = 'body') -> List[dict]:
+        """把选中片段的时长改成区间内的随机值。
+
+        只有带 avail 的片段（正常切片、智能选片的镜头）才参与，
+        完整素材模式（hook_full_duration / body_full_duration）保持原样。
+        """
+        if not rand or (rand['scope'] != 'all' and scope == 'hook'):
+            return clips
+        out: List[dict] = []
+        for clip in clips:
+            if 'avail' not in clip:
+                out.append(clip)
+                continue
+            item = dict(clip)
+            item['duration'] = self._pick_random_duration(rand, rng, clip.get('avail'))
+            out.append(item)
+        return out
 
     def pre_flight_check(self) -> Tuple[bool, str]:
         self.hook_pool.clear()
@@ -322,6 +423,16 @@ class VideoMatrixCore:
             return False, 'BGM 路径不存在，请重新选择；不需要配乐时请清空路径。'
         t_hook = cfg['t_hook']
         apply_timeline_totals(cfg)
+        try:
+            rand_cfg = self._random_duration_cfg(cfg)
+        except ValueError as exc:
+            return False, str(exc)
+        if rand_cfg and cfg.get('duration_mode') == 'bgm':
+            # 按音乐时长排片的模式不做随机，切片与池沿用原逻辑
+            rand_cfg = None
+        # 随机时长开启时，用「最短时长」做切点过滤：这样每个候选都能切出合规片段
+        need_hook = float(rand_cfg['min']) if (rand_cfg and rand_cfg['scope'] == 'all') else float(t_hook or 0)
+        need_body = float(rand_cfg['min']) if rand_cfg else float(cfg.get('t_body') or 0)
         body_specs = body_segment_specs(cfg)
         body_duration = cfg['body_duration']
         t_total = cfg['total_duration']
@@ -370,6 +481,13 @@ class VideoMatrixCore:
 
         self.shared.save_state()
 
+        # 智能选片：读「素材分析」的结果按镜头边界切、按分数排序；没分析过就回退等间隔切片
+        smart_select = bool(cfg.get('smart_select_enabled'))
+        smart_min = float(cfg.get('smart_select_min_score') or 0)
+        smart_hook_top = max(1, int(cfg.get('smart_select_hook_top') or 12))
+        smart_hook_used = 0
+        smart_body_used = 0
+
         hook_candidate_count = 0
         for f in hook_files:
             dur, has_audio, _ = probe_results[f]
@@ -379,20 +497,39 @@ class VideoMatrixCore:
                     self.hook_pool.append({'file': f, 'start': 0.0, 'duration': full_duration, 'has_audio': has_audio})
                     hook_candidate_count += 1
                 continue
-            step = max(t_hook * (1 - cfg['hook_r']), 0.1)
-            n = slice_count(dur, t_hook, step)
+            if smart_select:
+                smart_shots = self._smart_shots(f, need_hook, smart_min)
+                if smart_shots:
+                    # 只留分数最高的若干个做 Hook，保证开头不是随手切到的废镜头
+                    for shot in smart_shots[:smart_hook_top]:
+                        hook_id = f"{f}_{shot['start']:.2f}"
+                        if hook_id in self.shared.usage_history:
+                            continue
+                        self.hook_pool.append({
+                            'file': f, 'start': shot['start'],
+                            'duration': t_hook, 'has_audio': has_audio,
+                            'id': hook_id, 'score': shot['score'], 'tags': shot['tags'],
+                            'avail': shot['avail'],
+                        })
+                        smart_hook_used += 1
+                    hook_candidate_count += len(smart_shots)
+                    continue
+            step = max(need_hook * (1 - cfg['hook_r']), 0.1)
+            n = slice_count(dur, need_hook, step)
             if n <= 0:
                 continue
             hook_candidate_count += n
             if cfg['hook_r'] >= 0.99:
-                self.hook_pool.append({'file': f, 'start': 0.0, 'duration': t_hook, 'has_audio': has_audio})
+                self.hook_pool.append({'file': f, 'start': 0.0, 'duration': t_hook,
+                                       'has_audio': has_audio, 'avail': dur})
                 continue
             for i in range(n):
                 hook_id = f"{f}_{i*step:.2f}"
                 if hook_id not in self.shared.usage_history:
                     self.hook_pool.append({
                         'file': f, 'start': i * step,
-                        'duration': t_hook, 'has_audio': has_audio, 'id': hook_id
+                        'duration': t_hook, 'has_audio': has_audio, 'id': hook_id,
+                        'avail': max(dur - i * step, 0.0),
                     })
 
         if grouped_body:
@@ -401,6 +538,8 @@ class VideoMatrixCore:
                     return False, f"库 [{self.task_name}] Body 分组 {spec['group_index']} 目录不存在或未设置。"
                 pool: List[dict] = []
                 duration = spec['clip_duration']
+                # 分组各有时长设定：随机关闭时按组时长切片，开启时按随机下限切（兼容旧行为）
+                slice_len = float(rand_cfg['min']) if rand_cfg else duration
                 for f in files:
                     dur, has_audio, _ = probe_results[f]
                     if spec.get('full_duration'):
@@ -408,9 +547,10 @@ class VideoMatrixCore:
                         if full_duration > 0:
                             pool.append({'file': f, 'start': 0.0, 'duration': full_duration, 'has_audio': has_audio})
                         continue
-                    step = max(duration * (1 - cfg['body_r']), 0.1)
-                    for i in range(slice_count(dur, duration, step)):
-                        pool.append({'file': f, 'start': i * step, 'duration': duration, 'has_audio': has_audio})
+                    step = max(slice_len * (1 - cfg['body_r']), 0.1)
+                    for i in range(slice_count(dur, slice_len, step)):
+                        pool.append({'file': f, 'start': i * step, 'duration': duration,
+                                     'has_audio': has_audio, 'avail': max(dur - i * step, 0.0)})
                 if not audio_mode and len(pool) < spec['clip_count']:
                     return False, (
                         f"库 [{self.task_name}] Body 分组 {spec['group_index']} 素材不足："
@@ -426,10 +566,24 @@ class VideoMatrixCore:
                     if full_duration > 0:
                         self.body_pool.append({'file': f, 'start': 0.0, 'duration': full_duration, 'has_audio': has_audio})
                     continue
-                step = max(t_body * (1 - cfg['body_r']), 0.1)
-                n = slice_count(dur, t_body, step)
+                step = max(need_body * (1 - cfg['body_r']), 0.1)
+                if smart_select:
+                    smart_shots = self._smart_shots(f, need_body, smart_min)
+                    if smart_shots:
+                        # Body 不按分数截断，保留全部可用镜头，随机空间才够
+                        for shot in smart_shots:
+                            self.body_pool.append({
+                                'file': f, 'start': shot['start'],
+                                'duration': t_body, 'has_audio': has_audio,
+                                'score': shot['score'], 'tags': shot['tags'],
+                                'avail': shot['avail'],
+                            })
+                            smart_body_used += 1
+                        continue
+                n = slice_count(dur, need_body, step)
                 for i in range(n):
-                    self.body_pool.append({'file': f, 'start': i * step, 'duration': t_body, 'has_audio': has_audio})
+                    self.body_pool.append({'file': f, 'start': i * step, 'duration': t_body,
+                                           'has_audio': has_audio, 'avail': max(dur - i * step, 0.0)})
 
         if not self.hook_pool:
             if not hook_files:
@@ -441,7 +595,7 @@ class VideoMatrixCore:
                 )
                 return False, (
                     f"库 [{self.task_name}] 找到 {len(hook_files)} 个视频，但最长视频轨约 "
-                    f"{max_duration:.2f} 秒，短于首段设置 {t_hook:g} 秒。"
+                    f"{max_duration:.2f} 秒，短于首段设置 {need_hook:g} 秒。"
                 )
             return False, (
                 f"库 [{self.task_name}] 找到 {len(hook_files)} 个合规视频，"
@@ -529,6 +683,19 @@ class VideoMatrixCore:
             offset_label = '实际 Hook 结束' if cfg.get('hook_full_duration') else f'{t_hook:g} 秒'
             self.log(f"[{self.task_name}] 成品 Hook 保护：{', '.join(protected)} 从 {offset_label}后开始生效。")
 
+        if smart_select:
+            if smart_hook_used or smart_body_used:
+                self.log(f"[{self.task_name}] 智能选片：Hook {smart_hook_used} 段 / Body {smart_body_used} 段"
+                         f"（按画面分析分数排序，阈值 {smart_min:.0f} 分）")
+            else:
+                self.log(f"[{self.task_name}] 智能选片未命中（素材没分析过或分数不达标），已回退等间隔切片")
+
+        if rand_cfg:
+            scope_label = '全部片段（含 Hook）' if rand_cfg['scope'] == 'all' else '仅 Body'
+            unit = f"，精度 {rand_cfg['step']:g} 秒" if rand_cfg['step'] else ""
+            self.log(f"[{self.task_name}] 片段时长随机：{rand_cfg['min']:g}–{rand_cfg['max']:g} 秒（{scope_label}）"
+                     f"{unit}，每段独立取随机值；成片总时长随段数浮动。")
+
         self.rng.shuffle(self.hook_pool)
         return True, "预检通过"
 
@@ -552,9 +719,19 @@ class VideoMatrixCore:
 
     @staticmethod
     def _reserve_output(directory, stem):
-        """Claim a unique name before encoding; never overwrite another output."""
-        for _ in range(10):
-            destination = os.path.abspath(os.path.join(directory, f'{stem}_{uuid.uuid4().hex[:8]}.mp4'))
+        """Claim a unique name before encoding; never overwrite another output.
+
+        先用模板算出的原名；只有真的撞名才追加短随机串，
+        这样用户自定义的命名在正常情况下能保持干净。
+        随机串按需生成（惰性），避免白白消耗随机数。
+        """
+        def candidates():
+            yield stem
+            for _ in range(10):
+                yield f'{stem}_{uuid.uuid4().hex[:8]}'
+
+        for name in candidates():
+            destination = os.path.abspath(os.path.join(directory, f'{name}.mp4'))
             try:
                 descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
             except FileExistsError:
@@ -562,6 +739,58 @@ class VideoMatrixCore:
             os.close(descriptor)
             return destination
         raise FileExistsError('无法分配唯一输出文件名')
+
+    def _export_draft(self, cfg, clips, music_tracks, voice_clip, vol_voice, srt_info, out_path, total_duration):
+        """把这条成片的时间线写成剪映草稿；失败只记日志，不影响出片。"""
+        try:
+            root = resolve_draft_root(cfg.get('jianying_draft_dir') or '')
+            if not root:
+                if not self._draft_hint_shown:
+                    self._draft_hint_shown = True
+                    self.log(f'    [{self.task_name}] 剪映草稿：没找到草稿箱目录，本次跳过（可在输出设置里手动指定）')
+                return
+
+            hook_value = cfg.get('vol_hook_orig')
+            hook_gain = float(cfg['vol_orig'] if hook_value is None else hook_value) / 100.0
+            body_gain = float(cfg['vol_orig']) / 100.0
+            timeline = [{
+                'path': clip['file'],
+                'start': float(clip.get('start') or 0.0),
+                'duration': float(clip['duration']),
+                'volume': hook_gain if index == 0 else body_gain,
+            } for index, clip in enumerate(clips)]
+
+            tracks = [{
+                'file': track['file'],
+                'start': float(track.get('start') or 0.0),
+                'duration': float(track['duration']),
+                'offset': float(track.get('offset') or 0.0),
+                'volume': float(track.get('volume') or 1.0),
+                'source_duration': track.get('source_duration'),
+            } for track in music_tracks]
+
+            voice = None
+            if voice_clip and vol_voice > 0:
+                voice = {
+                    'file': voice_clip['file'],
+                    'duration': float(voice_clip['duration']),
+                    'volume': float(vol_voice),
+                }
+
+            subtitles = read_srt_cues(srt_info['path'], srt_info['duration'], srt_info['offset']) if srt_info else []
+            width, height = map(int, str(cfg['resolution']).lower().replace('*', 'x').split('x'))
+
+            draft_dir = export_draft(
+                root, Path(out_path).stem,
+                width=width, height=height, fps=float(cfg['fps']),
+                total_duration=float(total_duration),
+                clips=timeline, music_tracks=tracks, voice=voice, subtitles=subtitles,
+                subtitle_y_percent=float(cfg.get('subtitle_y_percent') or 88.0),
+                subtitle_size_percent=float(cfg.get('subtitle_font_size_percent') or 5.6),
+            )
+            self.log(f'    [{self.task_name}] 剪映草稿已生成（{len(timeline)} 段 / {len(subtitles)} 条字幕）：{draft_dir}')
+        except Exception as exc:  # noqa: BLE001 - 草稿失败不能拖累成片
+            self.log(f'    [{self.task_name}] 剪映草稿生成失败（成片不受影响）：{exc}')
 
     def _render_single_video(self, task_idx: int, return_result: bool, workspace):
         if not self.is_running:
@@ -583,6 +812,15 @@ class VideoMatrixCore:
             ) if enabled)
             self.log(f"[{self.task_name}] [输出参数] 视频 {task_idx:03d}：{cfg['resolution']} · {cfg['bitrate']}（{active}）。")
         body_specs = body_segment_specs(cfg)
+        try:
+            rand_cfg = self._random_duration_cfg(cfg)
+        except ValueError as exc:
+            self.log(f'    [{self.task_name}] {exc}')
+            return (False, None, None) if return_result else False
+        if rand_cfg and cfg.get('duration_mode') == 'bgm':
+            # 完整 BGM 模式是「按音乐时长反推片段」，随机时长会和音乐打架
+            self.log(f'[{self.task_name}] 完整 BGM 模式按音乐时长排片，本次已忽略片段随机时长。')
+            rand_cfg = None
 
         with self.core_lock:
             if not self.hook_pool:
@@ -592,11 +830,12 @@ class VideoMatrixCore:
                     self.hook_cycle = list(self.hook_pool)
                     self.rng.shuffle(self.hook_cycle)
                 hook_clip = self.hook_cycle.pop()
-                cfg['t_hook'] = hook_clip['duration']
             elif cfg['hook_r'] >= 0.99:
                 hook_clip = self.rng.choice(self.hook_pool)
             else:
                 hook_clip = self.hook_pool.pop()
+            hook_clip = self._apply_random_durations([hook_clip], rand_cfg, self.rng, 'hook')[0]
+            cfg['t_hook'] = float(hook_clip['duration'])
 
             bgm_clip = self.rng.choice(self.bgm_pool) if self.bgm_pool else None
             if cfg.get('duration_mode') == 'bgm':
@@ -614,6 +853,7 @@ class VideoMatrixCore:
                 body_clips = self.rng.sample(self.body_pool, cfg['total_clips'] - 1)
             else:
                 body_clips = self.rng.choices(self.body_pool, k=cfg['total_clips'] - 1)
+            body_clips = self._apply_random_durations(body_clips, rand_cfg, self.rng, 'body')
 
             voice_clip = self.rng.choice(self.voice_pool) if self.voice_pool else None
 
@@ -622,6 +862,9 @@ class VideoMatrixCore:
         cfg['body_duration'] = sum(c['duration'] for c in body_clips)
         cfg['_body_clip_durations'] = [c['duration'] for c in body_clips]
         cfg['total_duration'] = cfg['t_hook'] + cfg['body_duration']
+        if rand_cfg:
+            durations = ', '.join(f"{c['duration']:g}" for c in ([hook_clip] + list(body_clips)))
+            self.log(f"[{self.task_name}] 片段时长（秒）：{durations}；成片 {cfg['total_duration']:.2f}s。")
         if cfg.get('duration_mode') != 'bgm' and any(spec.get('full_duration') for spec in body_specs):
             self.log(f"[{self.task_name}] Body 使用原素材时长：{len(body_clips)} 段，共 {cfg['body_duration']:.3f}s；成片 {cfg['total_duration']:.3f}s。")
         if cfg.get('duration_mode') == 'bgm':
@@ -656,18 +899,20 @@ class VideoMatrixCore:
                     self.log(f"[{self.task_name}] {TRACK_LABELS[scope]} {os.path.basename(track['file'])}：素材 {track['start']:.3f}s 起，视频 {track['offset']:.3f}–{track['offset'] + track['duration']:.3f}s，{action}" + ('；淡化时长已按比例缩短' if track['fade_adjusted'] else '') + '。')
 
         temp_srt_path_safe = None
+        srt_info = None
         with self.core_lock:
             self.output_configs[task_idx] = cfg
         if cfg.get('enable_srt') and (cfg.get('apply_srt_to_hook', True) or body_duration > 0):
             srt_on_hook = cfg.get('apply_srt_to_hook', True)
-            temp_srt_path_safe = self.process_srt(
+            srt_result = self.process_srt(
                 cfg['srt_dir'],
                 t_total if srt_on_hook else body_duration,
                 0.0 if srt_on_hook else t_hook,
             )
-            if not temp_srt_path_safe:
+            if not srt_result:
                 self.log(f"    [{self.task_name}] 字幕处理失败：SRT 无有效时间轴或编码无法读取。")
                 return (False, None, None) if return_result else False
+            temp_srt_path_safe, srt_info = srt_result
 
         vol_orig = cfg['vol_orig'] / 100.0
         hook_volume_value = cfg.get('vol_hook_orig')
@@ -970,7 +1215,12 @@ class VideoMatrixCore:
             audio_map = "[aout_final]"
 
         filter_complex = filter_complex.strip('; ')
-        out_stem = f"{self.task_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{task_idx:03d}"
+        out_stem = render_name_template(
+            cfg.get('output_name_template') or DEFAULT_NAME_TEMPLATE,
+            task=self.task_name,
+            index=task_idx,
+            resolution=cfg.get('resolution'),
+        )
         out_path = self._reserve_output(cfg['out_dir'], out_stem)
         workspace['output'] = out_path
 
@@ -1086,6 +1336,8 @@ class VideoMatrixCore:
             self.last_elapsed = round(elapsed_time, 1)
             now_str = datetime.now().strftime("%H:%M:%S")
             self.log(f"    [{now_str}] [{self.task_name}] 视频 {task_idx:03d} 混剪完成，耗时 {elapsed_time:.1f} 秒 -> {os.path.basename(out_path)}")
+            if cfg.get('export_jianying_draft'):
+                self._export_draft(cfg, clips, music_tracks, voice_clip, vol_voice, srt_info, out_path, t_total)
             return (True, out_path, self.last_elapsed) if return_result else True
         return (False, None, None) if return_result else False
 

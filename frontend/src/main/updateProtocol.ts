@@ -1,11 +1,11 @@
 import { verify } from 'node:crypto'
 import type { UpdateAsset, UpdateManifest, UpdatePreferences, UpdateSource } from '../shared/updates'
 
-export const UPDATE_REPO = 'w2968066/VideoMatrix--'
+export const UPDATE_REPO = '5100369/JYproject'
 export const UPDATE_FEED = `https://github.com/${UPDATE_REPO}/releases/latest/download/update.json`
 // A published package, independent of update.json being available. Read at most
 // its first KiB and cancel, never download an installer just to test a source.
-export const UPDATE_PROBE_ASSET = `https://github.com/${UPDATE_REPO}/releases/download/v2.7.1/VideoMatrix.Setup.2.7.1.exe`
+export const UPDATE_PROBE_ASSET = `https://github.com/${UPDATE_REPO}/releases/download/v1.0.0/VideoMatrix.Setup.1.0.0.exe`
 export function githubAssetURL(version: string, asset: UpdateAsset): string {
   return `https://github.com/${UPDATE_REPO}/releases/download/v${version}/${asset.name}`
 }

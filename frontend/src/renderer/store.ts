@@ -99,6 +99,17 @@ const defaultConfig: VideoConfig = {
   variant_blend_eof: 'loop',
   enable_random_cover: false,
   random_cover_mode: 'replace',
+  output_name_template: '{name}_{i:03d}',
+  export_jianying_draft: true,
+  jianying_draft_dir: '',
+  smart_select_enabled: false,
+  smart_select_min_score: 0,
+  smart_select_hook_top: 12,
+  clip_duration_random_enabled: false,
+  clip_duration_min: 2.0,
+  clip_duration_max: 4.0,
+  clip_duration_step: 0.1,
+  clip_duration_scope: 'body',
 }
 
 function loadSavedConfig(): VideoConfig {
@@ -123,6 +134,14 @@ function loadSavedConfig(): VideoConfig {
       })),
       enable_random_cover: Boolean(saved.enable_random_cover),
       random_cover_mode: saved.random_cover_mode === 'insert' ? 'insert' : 'replace',
+      // 早期默认模板只在旧写法里出现，迁移到新的短写法
+      output_name_template: saved.output_name_template === '{task}_{date}_{time}_{index:03d}'
+        ? defaultConfig.output_name_template!
+        : (typeof saved.output_name_template === 'string' && saved.output_name_template.trim()
+          ? saved.output_name_template
+          : defaultConfig.output_name_template),
+      export_jianying_draft: saved.export_jianying_draft !== false,
+      jianying_draft_dir: typeof saved.jianying_draft_dir === 'string' ? saved.jianying_draft_dir : '',
       random_resolution_enabled: Boolean(saved.random_resolution_enabled),
       random_resolution_min: saved.random_resolution_min ?? defaultConfig.random_resolution_min,
       random_resolution_max: saved.random_resolution_max ?? defaultConfig.random_resolution_max,

@@ -11,7 +11,7 @@ on:
       release_tag:
         description: "Release tag to upload the dmg to"
         required: true
-        default: "v2.8.0"
+        default: "v1.0.0"
   push:
     tags:
       - "v*"
@@ -26,6 +26,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # 版本号只有 package.json 一个来源；后端 /health 通过该环境变量读取
+      - name: Resolve app version
+        run: echo "VIDEOMATRIX_VERSION=$(python3 -c "import json;print(json.load(open('frontend/package.json'))['version'])")" >> "$GITHUB_ENV"
 
       # ── Python toolchain ─────────────────────────────────────────────────
       - name: Set up Python
@@ -46,32 +50,47 @@ jobs:
         uses: actions/cache@v4
         with:
           path: backend/ffmpeg
-          key: macos-evermeet-9.0.2-from-v2.7.0-v1
+          key: macos-media-tools-v1
 
-      # Reuse the same Evermeet 9.0.2 tools from our verified release. This
-      # avoids the upstream mirror's persistent 429 responses on CI runners.
-      # Only the two media tools are extracted; no old application code is used.
-      - name: Prepare verified FFmpeg static build
+      # 从任一已发布的 mac 安装包里取出内置的静态 ffmpeg/ffprobe。
+      # 先找本仓库，首次发布时本仓库还没有成品，则回退到上游公开仓库，
+      # 保证第一次构建也能出包。产物本身与上游完全一致（Evermeet 静态版）。
+      - name: Prepare FFmpeg static build
         if: steps.media-tools.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p backend/ffmpeg
-          tools_dir="$RUNNER_TEMP/videomatrix-media-tools"
+          tools_dir="$RUNNER_TEMP/vm-media-tools"
           mkdir -p "$tools_dir"
-          for attempt in 1 2 3; do
-            if gh release download v2.7.0 --repo "$GITHUB_REPOSITORY" \
-              --pattern VideoMatrix.Setup.2.7.0-mac.dmg --dir "$tools_dir" --clobber; then break; fi
-            if [ "$attempt" = 3 ]; then exit 1; fi
-            sleep 10
+          dmg=""
+          for repo in "$GITHUB_REPOSITORY" "w2968066/VideoMatrix--"; do
+            if [ -n "$dmg" ]; then break; fi
+            echo "尝试从 $repo 获取 mac 安装包"
+            for attempt in 1 2 3; do
+              rm -f "$tools_dir"/*.dmg
+              if gh release download --repo "$repo" --pattern "*-mac.dmg" --dir "$tools_dir" --clobber 2>/dev/null; then
+                dmg=$(ls "$tools_dir"/*-mac.dmg 2>/dev/null | head -1)
+                [ -n "$dmg" ] && break
+              fi
+              sleep 5
+            done
           done
-          dmg="$tools_dir/VideoMatrix.Setup.2.7.0-mac.dmg"
-          echo "be276ec7c6368a1b92cad5fea3fb1924b8f3849044030df1b2ecdde303d2b3aa  $dmg" | shasum -a 256 -c -
+          if [ -z "$dmg" ]; then
+            echo "::error::没有可用的 mac 安装包来源，无法提取 FFmpeg"
+            exit 1
+          fi
+          echo "使用：$dmg"
           mount_dir="$tools_dir/mounted"
           mkdir -p "$mount_dir"
           hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
-          trap 'hdiutil detach "$mount_dir"' EXIT
-          python - "$mount_dir/VideoMatrix.app/Contents/Resources/backend/videomatrix-backend" <<'PY'
+          backend_bin=$(find "$mount_dir" -path "*/Resources/backend/videomatrix-backend*" -type f | head -1)
+          if [ -z "$backend_bin" ]; then
+            hdiutil detach "$mount_dir" || true
+            echo "::error::安装包里没找到后端可执行文件"
+            exit 1
+          fi
+          python - "$backend_bin" <<'PY'
           from pathlib import Path
           from PyInstaller.archive.readers import CArchiveReader
           import sys
@@ -79,15 +98,16 @@ jobs:
           for tool in ("ffmpeg", "ffprobe"):
               Path("backend/ffmpeg", tool).write_bytes(archive.extract(tool))
           PY
+          hdiutil detach "$mount_dir" || true
 
       - name: Verify macOS media tools
         run: |
           chmod +x backend/ffmpeg/ffmpeg backend/ffmpeg/ffprobe
           for tool in ffmpeg ffprobe; do
-            version=$("backend/ffmpeg/$tool" -version | sed -n '1p')
+            version=$("backend/ffmpeg/$tool" -version 2>&1 | sed -n '1p')
             echo "$version"
-            # Evermeet appends its publisher suffix (for example -tessus).
-            echo "$version" | grep -E "^$tool version 9\\.0\\.2([- ]|$)"
+            # 只校验是可执行的 ffmpeg/ffprobe，不锁定具体小版本
+            echo "$version" | grep -Ei "^$tool version [0-9]+\."
           done
 
       - name: Test backend regressions

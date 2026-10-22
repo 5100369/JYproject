@@ -50,6 +50,7 @@ export function FeatureHelp({ topic, title, tutorial = false }: { topic?: string
     }
   }
   return <>
+    {/* ⚠️ 简易教程按钮：按钮上的「简易教程」四个字就在下面这行 */}
     <button ref={trigger} type="button" className={tutorial ? 'tutorial-trigger' : 'feature-help-trigger'}
       aria-label={heading} aria-haspopup="dialog" onClick={open}>{tutorial ? '简易教程' : <span className="feature-help-glyph">?</span>}</button>
     {createPortal(<dialog ref={dialog} className={`feature-help-dialog ${tutorial ? 'tutorial-dialog' : ''}`}
@@ -59,6 +60,12 @@ export function FeatureHelp({ topic, title, tutorial = false }: { topic?: string
         if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) dialog.current?.close()
       } }}>
       <div className="help-heading"><h2 id={id}>{heading}</h2><button type="button" aria-label="关闭说明" onClick={() => dialog.current?.close()}>关闭</button></div>
+      {/*
+       * ⚠️ 简易教程正文 —— 改教程内容就改这一段
+       * 每个 <section> 是一小节：<h3> 标题 + <p> 正文。
+       * 增删小节 = 增删 <section>，顺序就是弹窗里的显示顺序。
+       * 弹窗尺寸/字体样式在 src/renderer/index.css 的 .tutorial-content。
+       */}
       {tutorial ? <div className="tutorial-content">
         <section><h3>1. 普通混剪</h3><p>选择 Hook 和 Body → 设置首段、后段秒数与总片段数 → 填输出数量 → 预检 → 启动渲染。BGM 可留空，原声和配音独立设置。</p></section>
         <section><h3>2. 按顺序分组</h3><p>切换 Body“分组”，启用需要的组，为每组选择目录、片段数和单段时长。“添加分组”最多扩展到 10 组。输出顺序：Hook → Body 1 → … → Body 10，组内随机。Hook、Body 旁的“设置”可分别配置居中放大裁切，默认 100%，不额外放大；Body 设置用于所有后段。</p></section>

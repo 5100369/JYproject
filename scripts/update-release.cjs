@@ -8,7 +8,7 @@ function envelope(payload, key) {
   const bytes = Buffer.from(JSON.stringify(payload))
   return { payload: bytes.toString('base64'), signature: sign(null, bytes, key).toString('base64') }
 }
-async function publish(tag, gh = 'gh', repo = 'w2968066/VideoMatrix--') {
+async function publish(tag, gh = 'gh', repo = '5100369/JYproject') {
   const version = String(tag).replace(/^v/, '')
   if (!/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(version)) throw new Error('Invalid release version')
   const key = process.env.VIDEOMATRIX_UPDATE_PRIVATE_KEY

@@ -1,6 +1,6 @@
-import { useState, useEffect, useLayoutEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useStore } from '../store'
-import { api, TaskStatus, BgmScope, BgmTrack, getRandomResolutionOptions, validateRandomOutputConfig } from '../api/client'
+import { api, TaskStatus, BgmScope, BgmTrack, ScheduleItem, getRandomResolutionOptions, validateRandomOutputConfig } from '../api/client'
 import { Checkbox } from './ui/checkbox'
 import { Slider } from './ui/slider'
 import { SubtitlePreview } from './SubtitlePreview'
@@ -8,12 +8,39 @@ import { AssetCard } from './AssetCard'
 import { SourceFramingSettings } from './SourceFramingSettings'
 import { FeatureHelp } from './FeatureHelp'
 import { BgmPanel } from './BgmPanel'
+import SchedulePanel from './SchedulePanel'
+import CopyPanel from './CopyPanel'
+import AnalyzePanel from './AnalyzePanel'
 import UpdateControl from './UpdateControl'
 import { useDirectoryPicker } from './DirectoryPicker'
 
-const RESOLUTION_PRESETS = [
-  { label: '1080P', value: '1080*1920' },
-  { label: '2K', value: '1440*2560' },
+const RESOLUTION_GROUPS = [
+  {
+    label: '竖屏 9:16',
+    items: [
+      { label: '720P · 720×1280', value: '720*1280' },
+      { label: '1080P · 1080×1920', value: '1080*1920' },
+      { label: '2K · 1440×2560', value: '1440*2560' },
+      { label: '4K · 2160×3840', value: '2160*3840' },
+    ],
+  },
+  {
+    label: '横屏 16:9',
+    items: [
+      { label: '720P · 1280×720', value: '1280*720' },
+      { label: '1080P · 1920×1080', value: '1920*1080' },
+      { label: '4K · 3840×2160', value: '3840*2160' },
+    ],
+  },
+]
+
+const RESOLUTION_VALUES = RESOLUTION_GROUPS.flatMap(group => group.items.map(item => item.value))
+
+const NAME_TEMPLATE_PRESETS = [
+  { label: '简洁（默认）', template: '{name}_{i:03d}', sample: '混剪_001' },
+  { label: '带日期', template: '{name}_{date}_{i:03d}', sample: '混剪_20261013_001' },
+  { label: '带日期时间', template: '{name}_{date}_{time}_{i:03d}', sample: '混剪_20261013_185900_001' },
+  { label: '带随机串', template: '{name}_{date}_{i:03d}_{rand}', sample: '混剪_20261013_001_a7f2' },
 ]
 
 const VARIANT_STRENGTH_INFO = {
@@ -54,6 +81,46 @@ function readLastBrowseDirs(): Record<string, string> {
   }
 }
 
+const NAME_FIELD_ALIASES: Record<string, string> = {
+  name: 'task',
+  task: 'task',
+  i: 'index',
+  index: 'index',
+  date: 'date',
+  time: 'time',
+  datetime: 'datetime',
+  rand: 'rand',
+  resolution: 'resolution',
+}
+
+function previewOutputName(template: string, task: string, resolution: string, index = 1): string {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const values: Record<string, string | number> = {
+    task: task || 'Task',
+    index,
+    date,
+    time,
+    datetime: `${date}_${time}`,
+    rand: 'a7f2',
+    resolution: (resolution || '').replace('*', 'x'),
+  }
+  const rendered = (template || '').replace(
+    /\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([^{}]+))?\}/g,
+    (raw, key: string, spec?: string) => {
+      const field = NAME_FIELD_ALIASES[key]
+      if (!field) return raw
+      const value = values[field]
+      const zeroPad = spec ? /^0(\d+)d$/.exec(spec) : null
+      if (zeroPad && typeof value === 'number') return String(value).padStart(Number(zeroPad[1]), '0')
+      return String(value)
+    },
+  )
+  return rendered.replace(/[<>:"/\\|?*]/g, '_').slice(0, 80) || 'output'
+}
+
 function parentDirectory(filePath: string): string {
   const value = filePath.trim()
   const separatorIndex = Math.max(value.lastIndexOf('\\'), value.lastIndexOf('/'))
@@ -62,8 +129,7 @@ function parentDirectory(filePath: string): string {
   return value.slice(0, separatorIndex)
 }
 
-function rememberBrowseDirectory(key: string, selectedPath: string, fileMode = false) {
-  const remembered = readLastBrowseDirs()
+function rememberBrowseDirectory(key: string, selectedPath: string, fileMode = false) {  const remembered = readLastBrowseDirs()
   remembered[key] = fileMode ? parentDirectory(selectedPath) : selectedPath
   localStorage.setItem(LAST_BROWSE_DIRS_KEY, JSON.stringify(remembered))
 }
@@ -126,20 +192,6 @@ function ParamRow({ label, value, suffix, onChange, placeholder, disabled = fals
       />
       {suffix && <span className="w-7 shrink-0 text-[10px] text-muted-foreground">{suffix}</span>}
     </div>
-  )
-}
-
-function EyeIcon({ open }: { open: boolean }) {
-  return open ? (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" className="h-3.5 w-3.5">
-      <path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z" />
-      <circle cx="12" cy="12" r="2.7" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" className="h-3.5 w-3.5">
-      <path d="m3 3 18 18" />
-      <path d="M10.6 5.2A10.7 10.7 0 0 1 12 5c6.1 0 9.5 7 9.5 7a17.4 17.4 0 0 1-3.1 3.8M6.1 6.1C3.8 8 2.5 12 2.5 12s3.4 7 9.5 7c1.4 0 2.6-.3 3.7-.8M9.9 9.9A3 3 0 0 0 14.1 14" />
-    </svg>
   )
 }
 
@@ -379,7 +431,30 @@ export default function SinglePage() {
   const stopRequestsRef = useRef(new Set<string>())
   const [resumingTaskIds, setResumingTaskIds] = useState<string[]>([])
   const resumeRequestsRef = useRef(new Set<string>())
-  const [rightTab, setRightTab] = useState<'log' | 'tasks' | 'output' | 'variant'>('log')
+  const [rightTab, setRightTab] = useState<'log' | 'tasks' | 'output' | 'analyze' | 'copy' | 'schedule' | 'variant'>('log')
+  const outputNamePreview = previewOutputName(
+    config.output_name_template || '{name}_{i:03d}',
+    config.task_name || 'Task',
+    config.resolution || '',
+  )
+  const [resolutionCustom, setResolutionCustom] = useState(
+    () => !RESOLUTION_VALUES.includes(String(config.resolution || '')),
+  )
+  const [nameTemplateCustom, setNameTemplateCustom] = useState(
+    () => !NAME_TEMPLATE_PRESETS.some(preset => preset.template === config.output_name_template),
+  )
+  const [schedules, setSchedules] = useState<ScheduleItem[]>([])
+  const loadSchedules = useCallback(async () => {
+    try {
+      const list = await api.listSchedules()
+      setSchedules(list)
+    } catch { /* 后端重启期间静默失败，下次轮询会补上 */ }
+  }, [])
+  useEffect(() => {
+    void loadSchedules()
+    const timer = setInterval(() => { void loadSchedules() }, 5000)
+    return () => clearInterval(timer)
+  }, [loadSchedules])
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('vm-theme') as 'dark' | 'light') || 'dark')
   const [benchmarkRunning, setBenchmarkRunning] = useState(false)
   const [benchmarkProgress, setBenchmarkProgress] = useState(0)
@@ -387,7 +462,6 @@ export default function SinglePage() {
   const activeBenchmark = benchmarkRunning || tasks.some(task => task.task_id.startsWith('benchmark-') && ['pending', 'running'].includes(task.status))
   const [preflightRunning, setPreflightRunning] = useState(false)
   const [completionNotice, setCompletionNotice] = useState<string | null>(null)
-  const [contactVisible, setContactVisible] = useState(false)
   const [hookRange, setHookRange] = useState<[number, number] | null>(null)
   const [hookRangeError, setHookRangeError] = useState(false)
   const [bodyRange, setBodyRange] = useState<[number, number] | null>(null)
@@ -557,10 +631,29 @@ export default function SinglePage() {
     ? bgmRange.map((value, index) => (Math.max(value, effectiveHookRange[index]) + coverFrameDuration).toFixed(3)).join('–') + 's'
     : bgmRangeError || hookRangeError ? '时长读取失败，请预检' : '读取音频时长中…'
   const fullBodyDurationLabel = bodyRange && effectiveHookRange ? bodyRange.map((v, i) => (v + effectiveHookRange[i] + coverFrameDuration).toFixed(3)).join('–') + 's' : bodyRangeError ? '素材不足或读取失败，请预检' : '读取原片时长中…'
-  const durationLabel = config.duration_mode === 'bgm' ? audioDurationLabel : fullBody ? fullBodyDurationLabel : config.hook_full_duration
+  // 片段时长随机：成片总时长按「最短全取」到「最长全取」估算，实际受素材可用长度约束
+  const clipRandOn = Boolean(config.clip_duration_random_enabled) && config.duration_mode !== 'bgm'
+  const clipRandMin = Math.max(0.5, Number(config.clip_duration_min) || 0)
+  const clipRandMax = Math.max(clipRandMin, Number(config.clip_duration_max) || 0)
+  const bodyClipCount = config.body_mode === 'grouped'
+    ? enabledBodyGroups.reduce((total, group) => total + Math.max(0, Math.floor(Number(group.clip_count) || 0)), 0)
+    : Math.max(0, Number(config.total_clips) - 1)
+  const hookRandomOn = clipRandOn && config.clip_duration_scope === 'all' && !config.hook_full_duration
+  const bodyRandomOn = clipRandOn && !fullBody && bodyClipCount > 0
+  const randomDurationLabel = !fullBody && !config.hook_full_duration && (hookRandomOn || bodyRandomOn)
+    ? (() => {
+        const hookSeconds = Number(config.t_hook) || 0
+        const hookLo = hookRandomOn ? clipRandMin : hookSeconds
+        const hookHi = hookRandomOn ? clipRandMax : hookSeconds
+        const low = hookLo + (bodyRandomOn ? clipRandMin * bodyClipCount : bodySeconds) + coverFrameDuration
+        const high = hookHi + (bodyRandomOn ? clipRandMax * bodyClipCount : bodySeconds) + coverFrameDuration
+        return `约 ${low.toFixed(1)}–${high.toFixed(1)}s`
+      })()
+    : null
+  const durationLabel = randomDurationLabel ?? (config.duration_mode === 'bgm' ? audioDurationLabel : fullBody ? fullBodyDurationLabel : config.hook_full_duration
     ? hookRange ? hookRange.map(value => (value + bodySeconds + coverFrameDuration).toFixed(coverFrameDuration ? 3 : 1)).join('–') + 's'
       : !config.hook_dir ? '请选择 Hook 目录' : hookRangeError ? '时长读取失败' : '读取时长中…'
-    : (Number(config.t_hook) + bodySeconds + coverFrameDuration).toFixed(coverFrameDuration ? 3 : 1) + 's'
+    : (Number(config.t_hook) + bodySeconds + coverFrameDuration).toFixed(coverFrameDuration ? 3 : 1) + 's')
   const finishedHookMode = Boolean(config.finished_hook)
   const allOutputItems = tasks.flatMap(t => t.output_files.map((file) => ({
     file,
@@ -626,6 +719,13 @@ export default function SinglePage() {
       concurrent_tasks: concurrentTasks,
       total_clips: config.body_mode === 'grouped' ? groupedClipCount : config.total_clips,
     }
+  }
+
+  const pickAnalysisDirectory = async (): Promise<string | undefined> => {
+    if (!window.electronAPI) { addToast('请在 Electron 中运行', 'warning'); return undefined }
+    const selected = await openDirectory(undefined, false)
+    if (!selected) return undefined
+    return Array.isArray(selected) ? selected[0] : selected
   }
 
   const browse = async (key: string, multi = false) => {
@@ -902,17 +1002,16 @@ export default function SinglePage() {
         <div className="flex items-center justify-between gap-4 pb-1.5 mb-1.5 border-b border-border/[0.055] shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <h1 className="text-sm font-semibold text-foreground tracking-wide">VideoMatrix</h1>
+            {/*
+             * ═══ 简易教程入口（要改教程就找这里）════════════════════════════
+             * 下面这一行只负责打开教程弹窗。
+             *   · 按钮文案「简易教程」 → components/FeatureHelp.tsx 第 54 行
+             *   · 教程正文（6 个小节） → 同文件搜 `tutorial-content`
+             *   · 弹窗样式            → src/renderer/index.css 搜 `.tutorial-content`
+             *   · 不想显示这个入口    → 删掉下面这行即可
+             * ══════════════════════════════════════════════════════════════
+             */}
             <FeatureHelp tutorial />
-            <div className="flex shrink-0 items-center gap-1.5 rounded-[4px] border border-accent/45 bg-accent px-2.5 py-1 text-[12px] font-semibold leading-none text-background shadow-[0_0_0_1px_rgba(232,166,88,0.18),0_8px_24px_-14px_rgba(232,166,88,0.9)]">
-              <span>联系我</span>
-              <button type="button" aria-label={contactVisible ? '隐藏微信联系方式' : '显示微信联系方式'} aria-pressed={contactVisible}
-                onClick={() => setContactVisible((visible) => !visible)}
-                className="-my-1 -mr-1 flex h-6 w-6 items-center justify-center rounded-[3px] text-background/80 transition-colors hover:bg-background/15 hover:text-background focus:outline-none focus-visible:ring-1 focus-visible:ring-background"
-                title={contactVisible ? '隐藏联系方式' : '显示联系方式'}>
-                <EyeIcon open={contactVisible} />
-              </button>
-              {contactVisible && <span className="border-l border-background/35 pl-1.5 font-mono">VX：18667026883</span>}
-            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <UpdateControl />
@@ -1137,7 +1236,7 @@ export default function SinglePage() {
                     {config.duration_mode === 'bgm' && <p className="text-[10px] leading-4 text-accent">按完整全片 BGM 时长；保留完整 Hook · Body 自动裁尾 / 补齐</p>}
                     {config.duration_mode === 'bgm' && <p className="text-[10px] text-accent">预计成片 {durationLabel}</p>}
                     <div className="flex items-center gap-1">
-                      <div className="min-w-0 flex-1"><ParamRow label="首段" value={config.t_hook} disabled={config.hook_full_duration} onChange={(v) => setParam('t_hook', v)} /></div>
+                      <div className="min-w-0 flex-1"><ParamRow label="首段" value={config.t_hook} disabled={config.hook_full_duration || (!!config.clip_duration_random_enabled && config.clip_duration_scope === 'all')} onChange={(v) => setParam('t_hook', v)} /></div>
                       <span className="text-[10px] text-muted-foreground">s</span>
                       <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[9px] text-foreground/85" title="完整使用每个 Hook；随机轮换，用完一轮再重复">
                         <Checkbox checked={config.hook_full_duration} onCheckedChange={value => setConfig({ hook_full_duration: value === true })} />按原素材时长
@@ -1146,7 +1245,7 @@ export default function SinglePage() {
                     {config.hook_full_duration && config.body_mode === 'normal' && <p className="text-[9px] text-accent">预计成片 {durationLabel}</p>}
                     {config.body_mode === 'normal' ? <>
                       <div className="flex items-center gap-1">
-                        <div className="min-w-0 flex-1"><ParamRow label="后段" disabled={config.body_full_duration} value={config.t_body} suffix="s" onChange={(v) => setParam('t_body', v)} /></div>
+                        <div className="min-w-0 flex-1"><ParamRow label="后段" disabled={config.body_full_duration || !!config.clip_duration_random_enabled} value={config.t_body} suffix="s" onChange={(v) => setParam('t_body', v)} /></div>
                         <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[9px] text-foreground/85">
                           <Checkbox aria-label="普通 Body 按原素材时长" checked={!!config.body_full_duration}
                             onCheckedChange={value => setConfig({ body_full_duration: value === true })} />按原素材时长
@@ -1158,6 +1257,34 @@ export default function SinglePage() {
                       <ReadonlyParamRow label="总片段" value={config.duration_mode === 'bgm' ? '自动计算（按组循环）' : groupedClipCount} suffix="含 Hook" />
                       <ReadonlyParamRow label="总时长" value={durationLabel} />
                     </>}
+                    <div className={`space-y-1 rounded-[5px] border px-1.5 py-1 ${config.clip_duration_random_enabled ? 'border-accent/28 bg-accent/[0.035]' : 'border-border/[0.07]'}`}>
+                      <div className="flex items-center gap-1.5">
+                        <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-foreground/85" title="每个片段在最短/最长之间随机截取，成片总时长随之浮动">
+                          <Checkbox aria-label="片段时长随机" checked={!!config.clip_duration_random_enabled}
+                            onCheckedChange={value => setConfig({ clip_duration_random_enabled: value === true })} />片段时长随机
+                        </label>
+                        {config.clip_duration_random_enabled && (
+                          <div className="ml-auto flex shrink-0 overflow-hidden rounded-[3px] border border-border/20 text-[9px]">
+                            {([['body', '仅Body'], ['all', '含Hook']] as const).map(([scope, label]) => (
+                              <button key={scope} type="button" aria-pressed={(config.clip_duration_scope ?? 'body') === scope}
+                                onClick={() => setConfig({ clip_duration_scope: scope })}
+                                className={`px-1.5 py-0.5 ${(config.clip_duration_scope ?? 'body') === scope ? 'bg-accent text-background' : 'text-muted-foreground hover:text-foreground/80'}`}>
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      {config.clip_duration_random_enabled && <>
+                        <ParamRow label="最短" value={config.clip_duration_min ?? 2} suffix="s" onChange={(v) => setParam('clip_duration_min', v)} />
+                        <ParamRow label="最长" value={config.clip_duration_max ?? 4} suffix="s" onChange={(v) => setParam('clip_duration_max', v)} />
+                        <p className="pl-0.5 text-[9px] leading-3 text-muted-foreground">
+                          {config.duration_mode === 'bgm'
+                            ? '完整 BGM 模式下不生效（按音乐时长排片）'
+                            : <>成片预计 <span className="text-accent">{durationLabel}</span>，每段独立随机，受素材/镜头可用长度约束</>}
+                        </p>
+                      </>}
+                    </div>
                     <ParamRow label="数量" value={config.target_count} onChange={(v) => setParam('target_count', v)} />
                     <ParamRow label="并发" value={config.concurrent_tasks ?? 3} onChange={(v) => setParam('concurrent_tasks', v)} />
                   </div>
@@ -1197,28 +1324,45 @@ export default function SinglePage() {
             <Group title="输出" className="flex min-h-0 flex-1 flex-col">
               <div role="region" aria-label="输出设置" className="grid flex-1 grid-cols-2 gap-x-3 gap-y-1.5 items-center rounded-[6px] border border-border/[0.055] bg-foreground/[0.018] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
                 <div className="flex items-center gap-2 min-w-0">
-                  <div className="flex-1 min-w-0">
-                    <ParamRow label="分辨率" value={config.resolution} placeholder="1080*1920" onChange={(v) => setConfig({ resolution: v })} />
-                  </div>
-                  <span className="w-12 shrink-0 font-mono text-[11px] text-accent">{getResolutionTag(config.resolution)}</span>
-                  <div className="flex shrink-0 items-center gap-1">
-                    {RESOLUTION_PRESETS.map((preset) => (
-                      <button
-                        key={preset.value}
-                        type="button"
-                        onClick={() => setConfig({ resolution: preset.value })}
-                        className={`h-7 rounded-[4px] border px-2 text-[10px] font-semibold transition-colors ${
-                          config.resolution === preset.value
-                            ? 'border-accent bg-accent text-background'
-                            : 'border-border/[0.10] bg-foreground/[0.02] text-muted-foreground hover:border-accent/60 hover:text-accent'
-                        }`}
-                        title={`9:16 ${preset.value}`}
-                      >
-                        {preset.label}
-                      </button>
+                  <span className="w-12 shrink-0 text-[10px] text-muted-foreground">分辨率</span>
+                  <select
+                    aria-label="输出分辨率"
+                    value={resolutionCustom ? 'custom' : config.resolution}
+                    onChange={event => {
+                      const value = event.target.value
+                      if (value === 'custom') {
+                        setResolutionCustom(true)
+                        return
+                      }
+                      setResolutionCustom(false)
+                      setConfig({ resolution: value })
+                    }}
+                    className="h-7 min-w-0 flex-1 rounded-[4px] border border-border/[0.10] bg-background-elev px-1.5 font-mono text-[10px] text-foreground outline-none focus:border-accent/70"
+                  >
+                    {RESOLUTION_GROUPS.map(group => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.items.map(item => (
+                          <option key={item.value} value={item.value}>{item.label}</option>
+                        ))}
+                      </optgroup>
                     ))}
-                  </div>
+                    <option value="custom">自定义…</option>
+                  </select>
+                  <span className="w-12 shrink-0 text-right font-mono text-[11px] text-accent">{getResolutionTag(config.resolution)}</span>
                 </div>
+                {resolutionCustom && (
+                  <div className="col-span-2 flex items-center gap-2">
+                    <span className="w-12 shrink-0 text-[10px] text-muted-foreground">宽×高</span>
+                    <input
+                      aria-label="自定义分辨率"
+                      value={config.resolution}
+                      onChange={event => setConfig({ resolution: event.target.value })}
+                      placeholder="1080*1920"
+                      className="h-7 min-w-0 flex-1 rounded-[4px] border border-border/[0.10] bg-background-elev px-2 font-mono text-[10px] text-foreground outline-none placeholder:text-muted-foreground/50 focus:border-accent/70"
+                    />
+                    <span className="shrink-0 text-[9px] text-muted-foreground">格式：宽*高</span>
+                  </div>
+                )}
                 <ParamRow label="码率" value={config.bitrate} disabled={config.random_bitrate_enabled} placeholder="8000k" onChange={(v) => setConfig({ bitrate: v })} />
                 <RandomOutputRange label="随机分辨率" enabled={config.random_resolution_enabled}
                   minimum={config.random_resolution_min} maximum={config.random_resolution_max} lowerBound={128} upperBound={7680} unit="短边 px"
@@ -1259,6 +1403,67 @@ export default function SinglePage() {
                   )}
                   <span className="text-[9px] text-muted-foreground">随机抽帧裁切；插入会延长 1 帧，音频同步后移</span>
                 </div>
+
+                <div className="col-span-2 flex items-center gap-2 border-t border-border/[0.06] pt-1.5">
+                  <span className="w-[60px] shrink-0 text-[10px] text-foreground/80">命名格式</span>
+                  <select
+                    aria-label="命名格式预设"
+                    value={nameTemplateCustom ? 'custom' : (config.output_name_template || '')}
+                    onChange={event => {
+                      const value = event.target.value
+                      if (value === 'custom') {
+                        setNameTemplateCustom(true)
+                        return
+                      }
+                      setNameTemplateCustom(false)
+                      setConfig({ output_name_template: value })
+                    }}
+                    className="h-7 min-w-0 flex-1 rounded-[4px] border border-border/[0.10] bg-background-elev px-1.5 font-mono text-[10px] text-foreground outline-none focus:border-accent/70"
+                  >
+                    {NAME_TEMPLATE_PRESETS.map(preset => (
+                      <option key={preset.template} value={preset.template}>
+                        {preset.label} · {preset.sample}
+                      </option>
+                    ))}
+                    <option value="custom">自定义…</option>
+                  </select>
+                  <span className="max-w-[150px] shrink-0 truncate font-mono text-[9px] text-accent" title={`预览：${outputNamePreview}.mp4`}>
+                    {outputNamePreview}.mp4
+                  </span>
+                </div>
+                {nameTemplateCustom && (
+                  <div className="col-span-2 flex items-center gap-2">
+                    <span className="w-[60px] shrink-0" />
+                    <input
+                      aria-label="输出文件名模板"
+                      value={config.output_name_template || ''}
+                      onChange={event => setConfig({ output_name_template: event.target.value })}
+                      placeholder="{name}_{i:03d}"
+                      className="h-7 min-w-0 flex-1 rounded-[4px] border border-border/[0.10] bg-background-elev px-2 font-mono text-[10px] text-foreground outline-none placeholder:text-muted-foreground/50 focus:border-accent/70"
+                    />
+                  </div>
+                )}
+
+                <div className="col-span-2 flex items-center gap-2">
+                  <label className="flex shrink-0 cursor-pointer items-center gap-1.5">
+                    <Checkbox
+                      checked={config.export_jianying_draft !== false}
+                      onCheckedChange={value => setConfig({ export_jianying_draft: value === true })}
+                    />
+                    <span className="text-[11px] text-foreground/85">同时导出剪映草稿</span>
+                  </label>
+                  <input
+                    aria-label="剪映草稿目录"
+                    value={config.jianying_draft_dir || ''}
+                    onChange={event => setConfig({ jianying_draft_dir: event.target.value })}
+                    placeholder="草稿箱目录，留空自动探测"
+                    className="h-7 min-w-0 flex-1 rounded-[4px] border border-border/[0.10] bg-background-elev px-2 font-mono text-[10px] text-foreground outline-none placeholder:text-muted-foreground/50 focus:border-accent/70"
+                  />
+                  <button type="button" onClick={() => browse('jianying_draft_dir')}
+                    className="h-7 shrink-0 rounded-[4px] border border-border/[0.08] px-2 text-[10px] text-foreground/85 hover:border-accent/50 hover:text-accent">
+                    选择
+                  </button>
+                </div>
               </div>
             </Group>
 
@@ -1267,23 +1472,26 @@ export default function SinglePage() {
           {/* ─── RIGHT: telemetry panel ─── */}
           <div className="flex flex-col min-h-0 rounded-[6px] border border-border/[0.07] bg-foreground/[0.018] shadow-[0_8px_32px_-18px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.035)] overflow-hidden">
             {/* Tab strip */}
-            <div className="flex items-center border-b border-border/[0.06] px-3 shrink-0">
+            <div className="flex items-center border-b border-border/[0.06] px-3 shrink-0 overflow-x-auto no-scrollbar">
               {([
-                { k: 'log',    label: '日志', count: logs.length },
-                { k: 'tasks',  label: '任务', count: tasks.length },
-                { k: 'output', label: '产出', count: allOutputItems.length },
-                { k: 'variant', label: '去重变换', count: config.enable_variants ? 'ON' : 'OFF' },
+                { k: 'log',      label: '日志', count: logs.length },
+                { k: 'tasks',    label: '任务', count: tasks.length },
+                { k: 'output',   label: '产出', count: allOutputItems.length },
+                { k: 'analyze',  label: '分析', count: '' },
+                { k: 'copy',     label: '文案', count: '' },
+                { k: 'schedule', label: '定时', count: schedules.filter(item => item.enabled).length },
+                { k: 'variant',  label: '去重', count: config.enable_variants ? 'ON' : '' },
               ] as const).map(t => (
                 <button
                   key={t.k}
                   onClick={() => setRightTab(t.k as any)}
-                  className={`relative px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] transition-colors ${
+                  className={`relative shrink-0 whitespace-nowrap px-2 py-1.5 text-[10px] uppercase tracking-[0.1em] transition-colors ${
                     rightTab === t.k ? 'text-accent' : 'text-muted-foreground hover:text-foreground/80'
                   }`}
                 >
                   {t.label}
-                  <span className="ml-1.5 font-mono opacity-70 tabular-nums">{t.count}</span>
-                  {rightTab === t.k && <span className="absolute left-3 right-3 -bottom-px h-px bg-accent" />}
+                  {t.count !== '' && <span className="ml-1 font-mono opacity-70 tabular-nums">{t.count}</span>}
+                  {rightTab === t.k && <span className="absolute left-1.5 right-1.5 -bottom-px h-px bg-accent" />}
                 </button>
               ))}
               {rightTab === 'log' && logs.length > 0 && (
@@ -1385,6 +1593,17 @@ export default function SinglePage() {
                     ))
                   )}
                 </div>
+              )}
+
+              {/* ANALYZER */}
+              {rightTab === 'analyze' && <AnalyzePanel pickDirectory={pickAnalysisDirectory} />}
+
+              {/* COPYWRITER */}
+              {rightTab === 'copy' && <CopyPanel />}
+
+              {/* SCHEDULE */}
+              {rightTab === 'schedule' && (
+                <SchedulePanel schedules={schedules} reload={() => { void loadSchedules() }} />
               )}
 
               {/* OUTPUT TRANSFORMER */}

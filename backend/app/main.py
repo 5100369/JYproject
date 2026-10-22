@@ -3,6 +3,7 @@ import sys
 import json
 import socket
 import threading
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,10 +14,33 @@ from .api.routes import router
 if getattr(sys, 'frozen', False):
     os.chdir(os.path.dirname(sys.executable))
 
+FALLBACK_VERSION = "1.0.0"
+
+
+def resolve_version() -> str:
+    """版本号来源：环境变量 > 源码树的 package.json > 兜底常量。
+
+    Electron 启动后端时会通过 VIDEOMATRIX_VERSION 传入真实版本；
+    直接跑源码时回退读 frontend/package.json，避免两处版本不一致。
+    """
+    env_version = str(os.environ.get("VIDEOMATRIX_VERSION") or "").strip()
+    if env_version:
+        return env_version
+    try:
+        candidate = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
+        if candidate.is_file():
+            version = json.loads(candidate.read_text(encoding="utf-8")).get("version")
+            if version:
+                return str(version)
+    except Exception:  # noqa: BLE001 - 版本读取失败不应阻塞启动
+        pass
+    return FALLBACK_VERSION
+
+
 app = FastAPI(
     title="VideoMatrix API",
     description="VideoMatrix 短视频矩阵自动化混剪后端 API",
-    version="2.8.0"
+    version=resolve_version()
 )
 
 app.add_middleware(
@@ -28,6 +52,13 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    # 定时任务在后台线程里轮询；应用不启动时自然不会触发。
+    from .services.scheduler_service import scheduler_service
+    scheduler_service.start()
 
 
 @app.get("/api/health")

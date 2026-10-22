@@ -130,12 +130,25 @@ export interface VideoConfig {
   variant_blend_eof: 'loop' | 'freeze' | 'error'
   enable_random_cover: boolean
   random_cover_mode: 'replace' | 'insert'
+  output_name_template?: string
+  export_jianying_draft?: boolean
+  jianying_draft_dir?: string
+  smart_select_enabled?: boolean
+  smart_select_min_score?: string | number
+  smart_select_hook_top?: string | number
+  clip_duration_random_enabled?: boolean
+  clip_duration_min?: string | number
+  clip_duration_max?: string | number
+  clip_duration_step?: string | number
+  clip_duration_scope?: 'body' | 'all'
 }
 
 const NUMERIC_CONFIG_FIELDS = [
   't_hook', 't_body', 'total_clips', 'target_count', 'hook_r', 'body_r', 'bgm_r',
   'fps', 'vol_orig', 'vol_hook_orig', 'vol_bgm', 'vol_voice', 'subtitle_y_percent',
   'subtitle_font_size_percent', 'concurrent_tasks', 'variant_seed',
+  'smart_select_min_score', 'smart_select_hook_top',
+  'clip_duration_min', 'clip_duration_max', 'clip_duration_step',
 ] as const
 
 function numberIfValid(value: unknown) {
@@ -229,6 +242,22 @@ export function normalizeConfigForRequest(config: VideoConfig): VideoConfig {
     normalized.t_body = 3
     normalized.total_clips = Math.max(2, 1 + groupClipCount)
   }
+  normalized.clip_duration_random_enabled = Boolean(config.clip_duration_random_enabled)
+  normalized.clip_duration_scope = config.clip_duration_scope === 'all' ? 'all' : 'body'
+  if (normalized.clip_duration_random_enabled) {
+    const lo = Number(normalized.clip_duration_min), hi = Number(normalized.clip_duration_max)
+    if (![lo, hi].every(value => Number.isFinite(value) && value >= 0.5 && value <= 120)) {
+      throw new Error('片段随机时长：最短/最长须为 0.5–120 秒')
+    }
+    if (lo > hi) throw new Error('片段随机时长：最短时长不能大于最长时长')
+    // 固定时长输入此时被随机区间接管，保底成合法值，避免隐藏字段触发后端校验
+    const safeSeconds = (value: unknown, fallback: number) => {
+      const parsed = Number(value)
+      return Number.isFinite(parsed) && parsed >= 0.5 ? parsed : fallback
+    }
+    normalized.t_body = safeSeconds(normalized.t_body, 3)
+    if (normalized.clip_duration_scope === 'all') normalized.t_hook = safeSeconds(normalized.t_hook, 3)
+  }
   normalized.enable_random_cover = Boolean(config.enable_random_cover)
   normalized.body_full_duration = Boolean(config.body_full_duration)
   if (normalized.body_full_duration) normalized.t_body = 3
@@ -300,6 +329,128 @@ export interface FramingPreview {
   time_seconds: number
 }
 
+export type ScheduleTrigger = 'once' | 'daily' | 'weekly' | 'interval'
+
+export interface ScheduleItem {
+  id: string
+  name: string
+  trigger_type: ScheduleTrigger
+  time_of_day: string
+  weekdays: number[]
+  run_at: string
+  interval_minutes: number
+  enabled: boolean
+  grace_minutes: number
+  next_run: string
+  last_run: string
+  last_task_id: string
+  last_result: '' | 'started' | 'busy' | 'missed' | 'error'
+  last_message: string
+  run_count: number
+  created_at: string
+  config?: VideoConfig
+}
+
+export interface SchedulePayload {
+  name: string
+  config: VideoConfig
+  trigger_type: ScheduleTrigger
+  time_of_day?: string
+  weekdays?: number[]
+  run_at?: string
+  interval_minutes?: number
+  grace_minutes?: number
+}
+
+export interface LlmSettingsInfo {
+  base_url: string
+  model: string
+  vision_model: string
+  temperature: number
+  has_key: boolean
+}
+
+export type ShotLevel = 'hook' | 'body' | 'low'
+
+export interface AnalysisShot {
+  index: number
+  start: number
+  end: number
+  duration: number
+  blur: number | null
+  yavg: number | null
+  motion: number | null
+  score: number
+  level: ShotLevel
+  tags: string[]
+  thumb: string
+  parts?: Record<string, number>
+  vlm?: {
+    description: string
+    tags: string[]
+    onscreen_text: string
+    has_person: boolean
+    product_visible: boolean
+    hook_score: number
+    usage: 'hook' | 'body' | 'unusable'
+  } | null
+}
+
+export interface AnalysisResult {
+  file: string
+  name: string
+  duration: number
+  width: number
+  height: number
+  fps: number
+  has_audio: boolean
+  vlm_used: boolean
+  vlm_errors: number
+  shots: AnalysisShot[]
+  summary: {
+    shot_count: number
+    avg_score: number
+    hook_count: number
+    body_count: number
+    low_count: number
+    best_index: number | null
+    best_score: number
+  }
+}
+
+export interface AnalysisFileEntry {
+  name: string
+  path: string
+  key: string
+  duration: number
+  shot_count: number
+  avg_score: number
+  best_score: number
+  hook_count: number
+  vlm_used: boolean
+  vlm_errors: number
+  error: string
+}
+
+export interface AnalysisJob {
+  id: string
+  status: 'running' | 'stopping' | 'completed' | 'stopped' | 'failed'
+  directory: string
+  total: number
+  done: number
+  stage: string
+  stage_done: number
+  stage_total: number
+  current: string
+  files: AnalysisFileEntry[]
+  errors: { name: string; error: string }[]
+  use_vlm: boolean
+  started_at: string
+  finished_at: string
+}
+
+export const getApiBase = getBaseUrl
+
 export const api = {
   framingPreview: (paths: string[], signal?: AbortSignal) => request<FramingPreview>('/framing/preview', {
     method: 'POST', body: JSON.stringify({ paths }), signal,
@@ -365,4 +516,64 @@ export const api = {
 
   clearHistory: () =>
     request<{ message: string }>('/history/clear', { method: 'POST' }),
+
+  listSchedules: () => request<ScheduleItem[]>('/schedules'),
+
+  createSchedule: (payload: SchedulePayload) =>
+    request<ScheduleItem>('/schedules', {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, config: normalizeConfigForRequest(payload.config) }),
+    }),
+
+  updateSchedule: (id: string, patch: Partial<Omit<SchedulePayload, 'config'>> & { enabled?: boolean }) =>
+    request<ScheduleItem>(`/schedules/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteSchedule: (id: string) =>
+    request<{ message: string }>(`/schedules/${id}`, { method: 'DELETE' }),
+
+  runScheduleNow: (id: string) =>
+    request<{ task_id: string; message: string }>(`/schedules/${id}/run-now`, { method: 'POST' }),
+
+  getLlmSettings: () => request<LlmSettingsInfo>('/llm/settings'),
+
+  saveLlmSettings: (payload: {
+    base_url?: string; api_key?: string; model?: string;
+    temperature?: number; clear_key?: boolean
+  }) =>
+    request<LlmSettingsInfo>('/llm/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  generateCopy: (payload: { brief: string; count: number; style: string; duration: number }) =>
+    request<{ items: string[]; model: string }>('/llm/generate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  copyToSrt: (payload: { text: string; directory: string; filename?: string; chars_per_second?: number }) =>
+    request<{ path: string; cues: number; duration: number }>('/llm/to-srt', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  startAnalysis: (payload: {
+    directory: string; recursive?: boolean; use_vlm?: boolean;
+    limit?: number; max_shots?: number;
+  }) =>
+    request<AnalysisJob>('/analyze', { method: 'POST', body: JSON.stringify(payload) }),
+
+  getAnalysisJob: (id: string) => request<AnalysisJob>(`/analyze/${id}`),
+
+  stopAnalysis: (id: string) =>
+    request<{ message: string }>(`/analyze/${id}/stop`, { method: 'POST' }),
+
+  latestAnalysisJob: () => request<AnalysisJob | Record<string, never>>('/analyze/latest'),
+
+  getAnalysisResult: (key: string) => request<AnalysisResult>(`/analysis/${key}`),
+
+  clearAnalysis: () => request<{ removed: number }>('/analysis/clear', { method: 'POST' }),
 }

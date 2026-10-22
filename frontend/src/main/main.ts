@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, clipboard, net } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, clipboard, net, Tray, Notification } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import os from 'os'
@@ -21,6 +21,67 @@ let isQuitting = false
 let updateManager: UpdateManager | null = null
 let updateDemo: UpdateManager | null = null
 const activeUpdater = () => updateDemo ?? updateManager
+
+let tray: Tray | null = null
+let trayHintShown = false
+let closeInProgress = false
+
+/** 有启用中的定时任务时，关窗口只收进托盘，让调度器继续等点。 */
+async function enabledScheduleCount(): Promise<number> {
+  if (!backendVerified || !backendPort) return 0
+  try {
+    const response = await fetch(`http://127.0.0.1:${backendPort}/api/schedules`, { signal: AbortSignal.timeout(1500) })
+    if (!response.ok) return 0
+    const list = await response.json()
+    return Array.isArray(list) ? list.filter((item: any) => item?.enabled).length : 0
+  } catch {
+    return 0
+  }
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (backendVerified && !isQuitting) createWindow()
+    return
+  }
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function ensureTray(): Tray {
+  if (tray && !tray.isDestroyed()) return tray
+  const candidates = [
+    path.join(__dirname, 'icon.png'),
+    path.join(__dirname, '../renderer/icon.png'),
+  ]
+  let image = nativeImage.createEmpty()
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue
+    const loaded = nativeImage.createFromPath(candidate)
+    if (!loaded.isEmpty()) { image = loaded; break }
+  }
+  // 兜底：1x1 透明 PNG，保证 Tray 构造不会因为空图标失败
+  if (image.isEmpty()) {
+    image = nativeImage.createFromDataURL(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    )
+  }
+  tray = new Tray(image.getSize().width > 16 ? image.resize({ width: 16, height: 16 }) : image)
+  tray.setToolTip('VideoMatrix — 定时任务待命中')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开主界面', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: '退出 VideoMatrix', click: () => { void shutdownApp() } },
+  ]))
+  tray.on('click', () => showMainWindow())
+  tray.on('double-click', () => showMainWindow())
+  return tray
+}
+
+function destroyTray() {
+  if (tray && !tray.isDestroyed()) tray.destroy()
+  tray = null
+}
 
 async function updateActivity(): Promise<UpdateActivity> {
   if (!backendVerified || isQuitting) throw new Error('后端尚未就绪')
@@ -203,7 +264,13 @@ async function startBackend(): Promise<void> {
     [...(bundled ? [] : ['run_backend.py']), '--port', '0', '--host', '127.0.0.1'], {
       cwd: bundled ? path.dirname(bundled) : getDevBackendDir(),
       stdio: 'pipe', windowsHide: true, detached: process.platform !== 'win32',
-      env: { ...process.env, VIDEOMATRIX_INSTANCE: backendInstance, PYTHONIOENCODING: 'utf-8' },
+      env: {
+        ...process.env,
+        VIDEOMATRIX_INSTANCE: backendInstance,
+        // 让后端 /health 的版本号与应用版本保持一致（只有一个版本来源）
+        VIDEOMATRIX_VERSION: app.getVersion(),
+        PYTHONIOENCODING: 'utf-8',
+      },
     })
   backendProcess = child
   let errors = ''
@@ -320,6 +387,7 @@ async function shutdownApp() {
   updateDemo?.dispose()
   await stopBackendTasks()
   await stopBackend()
+  destroyTray()
   mainWindow?.destroy()
   app.quit()
 }
@@ -380,10 +448,32 @@ function createWindow() {
   })
 
   mainWindow.on('close', (event) => {
-    if (!isQuitting) {
-      event.preventDefault()
-      void shutdownApp()
-    }
+    if (isQuitting) return
+    event.preventDefault()
+    if (closeInProgress) return
+    closeInProgress = true
+    void (async () => {
+      try {
+        const active = await enabledScheduleCount()
+        if (active > 0 && mainWindow && !mainWindow.isDestroyed()) {
+          ensureTray()
+          mainWindow.hide()
+          if (!trayHintShown) {
+            trayHintShown = true
+            try {
+              new Notification({
+                title: 'VideoMatrix 仍在后台运行',
+                body: `还有 ${active} 个定时任务待执行。要彻底退出，请右键托盘图标选择「退出 VideoMatrix」。`,
+              }).show()
+            } catch { /* 系统通知不可用时忽略 */ }
+          }
+        } else {
+          await shutdownApp()
+        }
+      } finally {
+        closeInProgress = false
+      }
+    })()
   })
 
   mainWindow.on('closed', () => {
@@ -600,7 +690,12 @@ if (!hasSingleInstanceLock) {
   })
 
   app.on('activate', () => {
-    if (mainWindow === null && backendVerified && !isQuitting) {
+    if (isQuitting) return
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      showMainWindow()
+      return
+    }
+    if (backendVerified) {
       createWindow()
     }
   })

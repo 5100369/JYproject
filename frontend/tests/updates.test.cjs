@@ -90,8 +90,8 @@ const pair = generateKeyPairSync('ed25519'), publicKey = pair.publicKey.export({
 const data = Buffer.from('synthetic installer bytes; never an executable'), hash = createHash('sha256').update(data).digest('hex')
 function manifest(version = '2.8.0') {
   return { schema: 1, version, publishedAt: '2026-10-13T00:00:00Z', notes: ['新增在线更新', '保留混剪配置'], platforms: {
-    'win32-x64': { name: `VideoMatrix.Setup.${version}.exe`, url: `https://github.com/w2968066/VideoMatrix--/releases/download/v${version}/VideoMatrix.Setup.${version}.exe`, size: data.length, sha256: hash },
-    'darwin-arm64': { name: `VideoMatrix.Setup.${version}-mac.dmg`, url: `https://github.com/w2968066/VideoMatrix--/releases/download/v${version}/VideoMatrix.Setup.${version}-mac.dmg`, size: data.length, sha256: hash },
+    'win32-x64': { name: `VideoMatrix.Setup.${version}.exe`, url: `https://github.com/5100369/JYproject/releases/download/v${version}/VideoMatrix.Setup.${version}.exe`, size: data.length, sha256: hash },
+    'darwin-arm64': { name: `VideoMatrix.Setup.${version}-mac.dmg`, url: `https://github.com/5100369/JYproject/releases/download/v${version}/VideoMatrix.Setup.${version}-mac.dmg`, size: data.length, sha256: hash },
   } }
 }
 function signed(value = manifest()) { return envelope(value, pair.privateKey) }
@@ -194,7 +194,7 @@ test('stale domestic replicas fall back to the fixed current GitHub release, not
   ] })
   await manager.check(); await manager.download()
   assert.equal(manager.snapshot().phase, 'ready'); assert.equal(downloads.length, 1)
-  assert.match(downloads[0], /github\.com\/w2968066\/VideoMatrix--\/releases\/download\/v2\.8\.0\//)
+  assert.match(downloads[0], /github\.com\/5100369\/JYproject\/releases\/download\/v2\.8\.0\//)
 })
 
 test('conflicting signed package contents for the same version are rejected', async t => {
