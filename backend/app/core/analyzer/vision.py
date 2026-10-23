@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from ..services import llm_service
+from ...services import llm_service
 
 SYSTEM_PROMPT = "你是短视频素材分析助手。只输出 JSON，不要解释。"
 
