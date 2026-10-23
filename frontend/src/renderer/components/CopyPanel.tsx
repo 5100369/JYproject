@@ -147,7 +147,12 @@ export default function CopyPanel() {
               {savingSettings ? '保存中…' : '保存接口配置'}
             </button>
             <p className="text-[9px] leading-4 text-muted-foreground">
-              DeepSeek、通义千问、豆包、Kimi、OpenAI 都走这套格式。Key 只存在本机配置文件里。
+              Base URL 要填到<b className="text-foreground/80">版本号那一级</b>：
+              <br />OpenAI / DeepSeek / Kimi → 结尾 <code>/v1</code>
+              <br />火山方舟（豆包）→ 结尾 <code>/api/v3</code>　智谱 → <code>/api/paas/v4</code>
+            </p>
+            <p className="text-[9px] leading-4 text-muted-foreground">
+              Key 只存在本机，不会上传。模型名填平台文档里的完整名称。
             </p>
           </div>
         )}

@@ -86,15 +86,34 @@ def public_settings() -> dict:
     }
 
 
-def _endpoint(base_url: str) -> str:
+def _endpoint_candidates(base_url: str) -> List[str]:
+    """按优先级给出候选请求地址。
+
+    各家的 Base URL 版本段不一样：
+      · OpenAI / DeepSeek / Kimi / 硅基流动 → 要 /v1
+      · 火山方舟（豆包）→ /api/v3
+      · 智谱 → /api/paas/v4
+    所以不再猜着补 /v1：先按用户填的原样请求，只有 404/405 才换下一种写法。
+    """
     url = (base_url or "").strip().rstrip("/")
     if not url:
         raise ValueError("请先填写接口地址（Base URL）")
     if url.endswith("/chat/completions"):
-        return url
-    if not url.endswith("/v1"):
-        url += "/v1"
-    return url + "/chat/completions"
+        return [url]
+    candidates = [f"{url}/chat/completions"]
+    # 末尾已经带版本段（/v1、/v3、/v4 …）时不要再补 /v1，否则必然 404
+    if not re.search(r"/v\d+$", url):
+        candidates.append(f"{url}/v1/chat/completions")
+    return candidates
+
+
+def _endpoint(base_url: str) -> str:
+    """单个地址（兼容旧调用）；多候选场景请用 _endpoint_candidates。"""
+    return _endpoint_candidates(base_url)[0]
+
+
+def _is_missing_path(message: str) -> bool:
+    return "接口返回 404" in message or "接口返回 405" in message
 
 
 def _post_json(url: str, payload: dict, api_key: str, timeout: float = 90.0) -> dict:
@@ -193,7 +212,24 @@ def generate(payload: dict) -> dict:
             {"role": "user", "content": _build_prompt(brief, count, style, duration)},
         ],
     }
-    response = _post_json(_endpoint(settings.get("base_url", "")), request_payload, api_key)
+    response = None
+    tried: List[str] = []
+    last_error: Optional[RuntimeError] = None
+    for endpoint in _endpoint_candidates(settings.get("base_url", "")):
+        tried.append(endpoint)
+        try:
+            response = _post_json(endpoint, request_payload, api_key)
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            # 只有「路径不存在」才换下一种写法；鉴权、模型名、额度错误直接抛
+            if not _is_missing_path(str(exc)):
+                raise
+    if response is None:
+        raise RuntimeError(
+            f"{last_error}。已尝试：{'、'.join(tried)}。"
+            "请确认 Base URL 填到版本号这一级（火山方舟例：https://ark.cn-beijing.volces.com/api/v3）"
+        )
     try:
         content = response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:

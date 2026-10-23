@@ -116,26 +116,29 @@ def analyze_frame(image_path: str, settings: Optional[dict] = None,
     }
 
     last_error = None
-    for attempt in range(2):
-        try:
-            response = llm_service._post_json(  # noqa: SLF001 - 复用同一套请求与错误处理
-                llm_service._endpoint(settings.get("base_url", "")),
-                payload, api_key, timeout=timeout,
-            )
-            content = response["choices"][0]["message"]["content"]
-            if isinstance(content, list):
-                # 少数服务商把 content 返回成数组
-                content = "".join(
-                    part.get("text", "") for part in content if isinstance(part, dict)
+    for endpoint in llm_service._endpoint_candidates(settings.get("base_url", "")):  # noqa: SLF001
+        for attempt in range(2):
+            try:
+                response = llm_service._post_json(  # noqa: SLF001 - 复用同一套请求与错误处理
+                    endpoint, payload, api_key, timeout=timeout,
                 )
-            parsed = _parse_json(content)
-            if parsed:
-                return _normalize(parsed)
-            last_error = "模型没有返回可解析的 JSON"
-        except Exception as exc:  # noqa: BLE001 - 单帧失败不该中断整批分析
-            last_error = str(exc)
-            if attempt == 1:
-                break
+                content = response["choices"][0]["message"]["content"]
+                if isinstance(content, list):
+                    # 少数服务商把 content 返回成数组
+                    content = "".join(
+                        part.get("text", "") for part in content if isinstance(part, dict)
+                    )
+                parsed = _parse_json(content)
+                if parsed:
+                    return _normalize(parsed)
+                last_error = "模型没有返回可解析的 JSON"
+                break  # 内容格式问题，换地址也没用
+            except Exception as exc:  # noqa: BLE001 - 单帧失败不该中断整批分析
+                last_error = str(exc)
+                if llm_service._is_missing_path(str(exc)):  # noqa: SLF001
+                    break  # 地址不对，换下一个候选
+                if attempt == 1:
+                    break
     if last_error:
         return None
     return None
