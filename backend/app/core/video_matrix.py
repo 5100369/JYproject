@@ -25,6 +25,8 @@ from .output_settings import resolve_output_config, validate_output_settings, pa
 from .naming import DEFAULT_NAME_TEMPLATE, render_name_template
 from .jianying_draft import export_draft, read_srt_cues, resolve_draft_root
 from .analyzer import store as analysis_store
+from . import subtitle
+from ..services import llm_service
 
 MEDIA_CACHE_VERSION = 2
 DURATION_EPSILON = 0.001
@@ -166,6 +168,7 @@ class VideoMatrixCore:
         self._variant_probe_cache = {}
         # 草稿目录只提示一次，避免批量出片时刷屏
         self._draft_hint_shown = False
+        self._subtitle_split_logged = False
 
     def _probe_variant_input(self, path: str) -> dict:
         """Only optional B inputs need an extra probe; share it across outputs."""
@@ -273,28 +276,58 @@ class VideoMatrixCore:
 
         slice_start_ms, slice_end_ms = 0, int(duration_sec * 1000)
         offset_ms = int(offset_sec * 1000)
-        new_subs, index = [], 1
-        blocks = re.compile(
-            r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\n(.*?)(?=\n\n|\Z)',
-            re.DOTALL
-        ).findall(content + "\n\n")
 
-        for _, t_start_str, t_end_str, text in blocks:
-            t_start = self.parse_time_to_ms(t_start_str)
-            t_end = self.parse_time_to_ms(t_end_str)
-            if t_end > slice_start_ms and t_start < slice_end_ms:
-                new_start = max(0, t_start - slice_start_ms) + offset_ms
-                new_end = min(duration_sec * 1000, t_end - slice_start_ms) + offset_ms
-                new_subs.append(
-                    f"{index}\n{self.format_ms_to_time(new_start)} --> {self.format_ms_to_time(new_end)}\n{text.strip()}"
-                )
-                index += 1
-
-        if not new_subs:
+        cues = subtitle.parse_srt(content)
+        clipped = []
+        for cue in cues:
+            if cue['end'] > slice_start_ms and cue['start'] < slice_end_ms:
+                clipped.append({
+                    'start': max(0, cue['start'] - slice_start_ms) + offset_ms,
+                    'end': min(duration_sec * 1000, cue['end'] - slice_start_ms) + offset_ms,
+                    'text': cue['text'],
+                })
+        if not clipped:
             return None
+
+        # 自动断句：把「一条几十个字」的长字幕切成短句，并按字数重排时间轴
+        auto_split = bool(self.config.get('subtitle_auto_split', True))
+        max_chars = float(self.config.get('subtitle_max_chars') or subtitle.DEFAULT_MAX_CHARS)
+        max_chars = max(6.0, min(40.0, max_chars))
+        min_chars = float(self.config.get('subtitle_min_chars') or subtitle.DEFAULT_MIN_CHARS)
+        use_ai = bool(self.config.get('subtitle_ai_split'))
+        mode = 'ai' if (auto_split and use_ai) else 'rule'
+
+        key = subtitle.cache_key(
+            f"{content}|{slice_start_ms}-{slice_end_ms}|{offset_ms}",
+            max_chars, min_chars, mode,
+        )
+        normalized = subtitle.load_cached(key) if auto_split else None
+        ai_used = False
+        if normalized is None:
+            if auto_split:
+                ai_parts = None
+                if use_ai:
+                    try:
+                        ai_parts = llm_service.split_subtitles(
+                            [cue['text'] for cue in clipped], int(round(max_chars))
+                        )
+                        ai_used = bool(ai_parts)
+                    except Exception:  # noqa: BLE001 - AI 断句失败不能挡住出片
+                        ai_parts = None
+                normalized = subtitle.normalize(clipped, max_chars, min_chars, ai_parts)
+            else:
+                normalized = clipped
+            subtitle.save_cached(key, normalized)
+
+        if auto_split and not self._subtitle_split_logged:
+            self._subtitle_split_logged = True
+            how = 'AI 语义断句' if ai_used else ('AI 不可用，已用规则断句' if use_ai else '规则断句')
+            self.log(f'[{self.task_name}] 字幕断句：{len(clipped)} 条 → {len(normalized)} 条'
+                     f'（{how}，每条 ≤ {max_chars:g} 字）')
+
         temp_srt_path = os.path.join(self.temp_dir_path, f"temp_{uuid.uuid4().hex[:8]}.srt")
         with open(temp_srt_path, 'w', encoding='utf-8') as f:
-            f.write("\n\n".join(new_subs) + "\n\n")
+            f.write(subtitle.build_srt(normalized))
         info = {'path': srt_path, 'duration': duration_sec, 'offset': offset_sec}
         return temp_srt_path.replace('\\', '/').replace(':', '\\:').replace("'", "'\\''"), info
 

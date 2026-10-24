@@ -116,6 +116,38 @@ def _is_missing_path(message: str) -> bool:
     return "接口返回 404" in message or "接口返回 405" in message
 
 
+def _chat(base_url: str, api_key: str, model: str, messages: list,
+          temperature: float = 0.3, timeout: float = 90.0) -> str:
+    """调一次 chat/completions，返回正文。
+
+    自动处理「Base URL 该不该带 /v1」：先按用户填的原样请求，
+    只有 404/405 才回退到补 /v1 的写法。
+    """
+    payload = {"model": model, "temperature": temperature, "messages": messages}
+    response = None
+    tried: List[str] = []
+    last_error: Optional[RuntimeError] = None
+    for endpoint in _endpoint_candidates(base_url):
+        tried.append(endpoint)
+        try:
+            response = _post_json(endpoint, payload, api_key, timeout=timeout)
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            # 只有「路径不存在」才换下一种写法；鉴权、模型名、额度错误直接抛
+            if not _is_missing_path(str(exc)):
+                raise
+    if response is None:
+        raise RuntimeError(
+            f"{last_error}。已尝试：{'、'.join(tried)}。"
+            "请确认 Base URL 填到版本号这一级（火山方舟例：https://ark.cn-beijing.volces.com/api/v3）"
+        )
+    try:
+        return response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("接口返回格式不认识，请确认填的是 OpenAI 兼容地址") from exc
+
+
 def _post_json(url: str, payload: dict, api_key: str, timeout: float = 90.0) -> dict:
     request = urllib.request.Request(
         url,
@@ -204,41 +236,108 @@ def generate(payload: dict) -> dict:
         duration = 30.0
     style = str(payload.get("style") or "").strip()
 
-    request_payload = {
-        "model": settings.get("model") or SETTINGS_DEFAULTS["model"],
-        "temperature": settings.get("temperature", 0.9),
-        "messages": [
-            {"role": "system", "content": "你是专业短视频口播文案编剧，只输出要求的 JSON。"},
-            {"role": "user", "content": _build_prompt(brief, count, style, duration)},
-        ],
-    }
-    response = None
-    tried: List[str] = []
-    last_error: Optional[RuntimeError] = None
-    for endpoint in _endpoint_candidates(settings.get("base_url", "")):
-        tried.append(endpoint)
-        try:
-            response = _post_json(endpoint, request_payload, api_key)
-            break
-        except RuntimeError as exc:
-            last_error = exc
-            # 只有「路径不存在」才换下一种写法；鉴权、模型名、额度错误直接抛
-            if not _is_missing_path(str(exc)):
-                raise
-    if response is None:
-        raise RuntimeError(
-            f"{last_error}。已尝试：{'、'.join(tried)}。"
-            "请确认 Base URL 填到版本号这一级（火山方舟例：https://ark.cn-beijing.volces.com/api/v3）"
-        )
-    try:
-        content = response["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("接口返回格式不认识，请确认填的是 OpenAI 兼容地址") from exc
+    model = settings.get("model") or SETTINGS_DEFAULTS["model"]
+    messages = [
+        {"role": "system", "content": "你是专业短视频口播文案编剧，只输出要求的 JSON。"},
+        {"role": "user", "content": _build_prompt(brief, count, style, duration)},
+    ]
+    content = _chat(
+        settings.get("base_url", ""), api_key, model, messages,
+        temperature=settings.get("temperature", 0.9),
+    )
+
 
     items = _extract_items(content)
     if not items:
         raise RuntimeError("模型没有返回可用文案，换个模型或降低要求再试")
-    return {"items": items[:count], "model": request_payload["model"]}
+    return {"items": items[:count], "model": model}
+
+
+# ── 字幕断句 ────────────────────────────────────────────────────────────
+_SUBTITLE_BATCH = 40
+
+
+def _parse_split_json(content: str, expected: int) -> List[Optional[List[str]]]:
+    text = (content or "").strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return [None] * expected
+
+    entries = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return [None] * expected
+
+    result: List[Optional[List[str]]] = [None] * expected
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            index = int(entry.get("i", position + 1)) - 1
+        except (TypeError, ValueError):
+            index = position
+        if not 0 <= index < expected:
+            continue
+        parts = entry.get("parts")
+        if isinstance(parts, list):
+            cleaned = [str(part).strip() for part in parts if str(part).strip()]
+            result[index] = cleaned or None
+    return result
+
+
+def split_subtitles(texts: List[str], max_chars: int = 15) -> Optional[List[Optional[List[str]]]]:
+    """让模型按语义把每条字幕切成短句。
+
+    返回与输入等长的列表（元素是分句数组，None 表示这条不切）。
+    未配置 Key、接口失败、返回格式异常时返回 None，调用方回退规则断句。
+    """
+    if not texts:
+        return []
+    settings = load_settings()
+    api_key = settings.get("api_key") or ""
+    if not api_key:
+        return None
+    model = settings.get("model") or SETTINGS_DEFAULTS["model"]
+
+    system_prompt = (
+        "你是短视频字幕排版助手。只输出 JSON，不要解释。"
+        "任务是把长字幕切成适合竖屏阅读的短句，绝对不允许改写、增删文字。"
+    )
+    results: List[Optional[List[str]]] = []
+
+    for start in range(0, len(texts), _SUBTITLE_BATCH):
+        batch = texts[start:start + _SUBTITLE_BATCH]
+        numbered = "\n".join(f"{index}. {text}" for index, text in enumerate(batch, 1))
+        user_prompt = (
+            f"把下面的字幕逐条切成短句，每条不超过 {max_chars} 个字（英文数字按半个字算）。\n"
+            "规则：\n"
+            "1. 只在语义完整处断开，不要拆开词语、品牌名、价格、数字；\n"
+            "2. 不改字、不增字、不删字，标点可以省略；\n"
+            "3. 一条可以切成 1 到 6 段，本来就短的不要切；\n"
+            '4. 只输出 JSON：{"items":[{"i":1,"parts":["第一段","第二段"]}]}\n\n'
+            f"字幕：\n{numbered}"
+        )
+        try:
+            content = _chat(
+                settings.get("base_url", ""), api_key, model,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                timeout=120.0,
+            )
+        except RuntimeError:
+            return None
+        results.extend(_parse_split_json(content, len(batch)))
+
+    return results if any(results) else None
 
 
 # ── SRT ──────────────────────────────────────────────────────────────────

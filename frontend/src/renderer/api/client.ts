@@ -113,6 +113,10 @@ export interface VideoConfig {
   enable_srt: boolean
   subtitle_y_percent: number
   subtitle_font_size_percent: number
+  subtitle_auto_split?: boolean
+  subtitle_max_chars?: string | number
+  subtitle_min_chars?: string | number
+  subtitle_ai_split?: boolean
   enable_gpu: boolean
   concurrent_tasks?: string | number
   enable_variants: boolean
@@ -147,6 +151,7 @@ const NUMERIC_CONFIG_FIELDS = [
   't_hook', 't_body', 'total_clips', 'target_count', 'hook_r', 'body_r', 'bgm_r',
   'fps', 'vol_orig', 'vol_hook_orig', 'vol_bgm', 'vol_voice', 'subtitle_y_percent',
   'subtitle_font_size_percent', 'concurrent_tasks', 'variant_seed',
+  'subtitle_max_chars', 'subtitle_min_chars',
   'smart_select_min_score', 'smart_select_hook_top',
   'clip_duration_min', 'clip_duration_max', 'clip_duration_step',
 ] as const

@@ -25,6 +25,15 @@ const RESOLUTION_GROUPS = [
     ],
   },
   {
+    label: '竖版 3:4',
+    items: [
+      { label: '720P · 720×960', value: '720*960' },
+      { label: '1080P · 1080×1440', value: '1080*1440' },
+      { label: '2K · 1440×1920', value: '1440*1920' },
+      { label: '4K · 2160×2880', value: '2160*2880' },
+    ],
+  },
+  {
     label: '横屏 16:9',
     items: [
       { label: '720P · 1280×720', value: '1280*720' },
@@ -1200,6 +1209,35 @@ export default function SinglePage() {
                       />
                       <span className="w-9 shrink-0 text-right font-mono text-[10px] text-accent">{subtitleFontSizePercent.toFixed(1)}%</span>
                     </div>
+                    <div className="flex h-7 items-center gap-1.5">
+                      <span className="w-[72px] shrink-0 text-[10px] text-foreground/80" title="把「一条几十个字」的长字幕切成短句，并按字数重排时间轴">自动断句</span>
+                      <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[9px] text-foreground/85">
+                        <Checkbox aria-label="字幕自动断句" checked={config.subtitle_auto_split !== false}
+                          onCheckedChange={value => setConfig({ subtitle_auto_split: value === true })} />开启
+                      </label>
+                      <span className="shrink-0 text-[9px] text-muted-foreground">每条</span>
+                      <input aria-label="单条字幕字数" inputMode="numeric" value={config.subtitle_max_chars ?? 15}
+                        disabled={config.subtitle_auto_split === false}
+                        onChange={event => setParam('subtitle_max_chars', event.target.value)}
+                        className="h-6 w-9 shrink-0 rounded-[4px] border border-border/[0.10] bg-background-elev px-1 text-center font-mono text-[10px] text-foreground outline-none focus:border-accent/70 disabled:opacity-40" />
+                      <span className="shrink-0 text-[9px] text-muted-foreground">字</span>
+                      <button type="button" aria-pressed={!!config.subtitle_ai_split}
+                        disabled={config.subtitle_auto_split === false}
+                        onClick={() => setConfig({ subtitle_ai_split: !config.subtitle_ai_split })}
+                        title="用 AI 按语义切分，避免把「增压花洒」切成「增压花」+「洒」；接口不可用时自动回退规则断句"
+                        className={`ml-auto h-6 shrink-0 rounded-[4px] border px-2 text-[9px] font-semibold transition-colors disabled:opacity-40 ${
+                          config.subtitle_ai_split
+                            ? 'border-accent bg-accent text-background'
+                            : 'border-border/[0.12] text-muted-foreground hover:border-accent/50 hover:text-accent'
+                        }`}>
+                        AI 语义
+                      </button>
+                    </div>
+                    {config.subtitle_auto_split !== false && config.subtitle_ai_split && (
+                      <p className="text-[9px] leading-3 text-accent">
+                        每个字幕文件只调用一次接口，结果会缓存；失败自动回退规则断句
+                      </p>
+                    )}
                   </div>
                 )}
                 <AssetCard kind="watermark" label="水印"      value={config.watermark_path || ''} pickAction="选择"

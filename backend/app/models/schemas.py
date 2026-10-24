@@ -82,6 +82,16 @@ class VideoConfig(BaseModel):
     enable_srt: bool = Field(default=False, description="是否启用硬字幕")
     subtitle_y_percent: float = Field(default=92.0, ge=8.0, le=92.0, description="字幕垂直位置百分比")
     subtitle_font_size_percent: float = Field(default=5.6, ge=3.0, le=9.0, description="字幕字号占画面高度百分比")
+    subtitle_auto_split: bool = Field(
+        default=True,
+        description="自动把长字幕切成短句，并按字数重排时间轴",
+    )
+    subtitle_max_chars: int = Field(default=15, ge=6, le=40, description="单条字幕最大字数")
+    subtitle_min_chars: int = Field(default=4, ge=1, le=20, description="短于该字数时尝试与相邻字幕合并")
+    subtitle_ai_split: bool = Field(
+        default=True,
+        description="用 AI 做语义断句，避免把词语、品牌名切断；接口失败自动回退规则断句",
+    )
     enable_gpu: bool = Field(default=True, description="自动选择可用硬件编码；不可用时继续使用CPU")
     concurrent_tasks: int = Field(default=3, ge=1, le=16, description="并发渲染数")
 
