@@ -6,7 +6,8 @@
 
 它不是通用剪辑软件，不提供手动时间线或复杂调色、美化。它更像一个“素材矩阵生成器”：把素材批量重组，并提供简单的居中放大裁切，解决人工纯混剪效率低的问题。
 
-![VideoMatrix 主界面](docs/images/main-window.png)
+![VideoMatrix 主界面](docs/images/main-window1.png)
+![VideoMatrix 主界面](docs/images/main-window2.png)
 
 > 本项目基于 [VideoMatrix](https://github.com/w2968066/VideoMatrix--) 二次开发，遵循 MIT 协议。在原版基础上加入了素材智能分析、片段时长随机、剪映草稿导出等能力，并改为独立发布自有版本。
 
